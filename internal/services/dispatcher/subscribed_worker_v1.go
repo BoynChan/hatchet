@@ -129,7 +129,10 @@ func (worker *subscribedWorker) sendToWorkerWithStream(
 	if err != nil {
 		encodeSpan.RecordError(err)
 		encodeSpan.End()
-		return fmt.Errorf("could not encode action: %w", err)
+		return newWorkerSendError(
+			dispatchFailureActionEncode,
+			fmt.Errorf("could not encode action: %w", err),
+		)
 	}
 
 	encodeSpan.End()
@@ -137,7 +140,7 @@ func (worker *subscribedWorker) sendToWorkerWithStream(
 	if !worker.sendLock.Acquire() {
 		span.RecordError(errFlowControlActive)
 		span.SetStatus(codes.Error, "flow control is active")
-		return errFlowControlActive
+		return newWorkerSendError(dispatchFailureSendLockTimeout, errFlowControlActive)
 	}
 
 	lockBegin := time.Now()
@@ -177,9 +180,16 @@ func (worker *subscribedWorker) sendToWorkerWithStream(
 
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("context done before send could complete: %w", ctx.Err())
+		return newWorkerSendError(
+			dispatchFailureContextDone,
+			fmt.Errorf("context done before send could complete: %w", ctx.Err()),
+		)
 	case err = <-sentCh:
-		return err
+		if err != nil {
+			return newWorkerSendError(streamSendFailureReason(err), err)
+		}
+
+		return nil
 	}
 }
 
