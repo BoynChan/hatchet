@@ -8,19 +8,20 @@ import (
 type GlobalHatchetMetric string
 
 const (
-	QueueInvocationsTotal       GlobalHatchetMetric = "hatchet_queue_invocations_total"
-	CreatedTasksTotal           GlobalHatchetMetric = "hatchet_created_tasks_total"
-	RetriedTasksTotal           GlobalHatchetMetric = "hatchet_retried_tasks_total"
-	SucceededTasksTotal         GlobalHatchetMetric = "hatchet_succeeded_tasks_total"
-	FailedTasksTotal            GlobalHatchetMetric = "hatchet_failed_tasks_total"
-	SkippedTasksTotal           GlobalHatchetMetric = "hatchet_skipped_tasks_total"
-	CancelledTasksTotal         GlobalHatchetMetric = "hatchet_cancelled_tasks_total"
-	AssignedTasksTotal          GlobalHatchetMetric = "hatchet_assigned_tasks"
-	SchedulingTimedOutTotal     GlobalHatchetMetric = "hatchet_scheduling_timed_out"
-	RateLimitedTotal            GlobalHatchetMetric = "hatchet_rate_limited"
-	QueuedToAssignedTotal       GlobalHatchetMetric = "hatchet_queued_to_assigned"
-	QueuedToAssignedTimeSeconds GlobalHatchetMetric = "hatchet_queued_to_assigned_time_seconds"
-	ReassignedTasksTotal        GlobalHatchetMetric = "hatchet_reassigned_tasks"
+	QueueInvocationsTotal         GlobalHatchetMetric = "hatchet_queue_invocations_total"
+	CreatedTasksTotal             GlobalHatchetMetric = "hatchet_created_tasks_total"
+	RetriedTasksTotal             GlobalHatchetMetric = "hatchet_retried_tasks_total"
+	SucceededTasksTotal           GlobalHatchetMetric = "hatchet_succeeded_tasks_total"
+	FailedTasksTotal              GlobalHatchetMetric = "hatchet_failed_tasks_total"
+	SkippedTasksTotal             GlobalHatchetMetric = "hatchet_skipped_tasks_total"
+	CancelledTasksTotal           GlobalHatchetMetric = "hatchet_cancelled_tasks_total"
+	AssignedTasksTotal            GlobalHatchetMetric = "hatchet_assigned_tasks"
+	SchedulingTimedOutTotal       GlobalHatchetMetric = "hatchet_scheduling_timed_out"
+	RateLimitedTotal              GlobalHatchetMetric = "hatchet_rate_limited"
+	QueuedToAssignedTotal         GlobalHatchetMetric = "hatchet_queued_to_assigned"
+	QueuedToAssignedTimeSeconds   GlobalHatchetMetric = "hatchet_queued_to_assigned_time_seconds"
+	ReassignedTasksTotal          GlobalHatchetMetric = "hatchet_reassigned_tasks"
+	DispatchToWorkerFailuresTotal GlobalHatchetMetric = "hatchet_dispatch_to_worker_failures_total"
 )
 
 var (
@@ -89,4 +90,9 @@ var (
 		Name: string(ReassignedTasksTotal),
 		Help: "The total number of tasks that were reassigned to a worker",
 	})
+
+	DispatchToWorkerFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: string(DispatchToWorkerFailuresTotal),
+		Help: "The total number of tasks that could not be sent to an assigned worker",
+	}, []string{"reason", "dispatcher_id"})
 )

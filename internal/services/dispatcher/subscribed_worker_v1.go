@@ -98,7 +98,10 @@ func (worker *subscribedWorker) sendToWorker(
 	if err != nil {
 		encodeSpan.RecordError(err)
 		encodeSpan.End()
-		return fmt.Errorf("could not encode action: %w", err)
+		return newWorkerSendError(
+			dispatchFailureActionEncode,
+			fmt.Errorf("could not encode action: %w", err),
+		)
 	}
 
 	encodeSpan.End()
@@ -107,7 +110,7 @@ func (worker *subscribedWorker) sendToWorker(
 		err = fmt.Errorf("could not acquire worker send mutex, flow control is active")
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "flow control is active")
-		return err
+		return newWorkerSendError(dispatchFailureSendLockTimeout, err)
 	}
 
 	lockBegin := time.Now()
@@ -147,9 +150,16 @@ func (worker *subscribedWorker) sendToWorker(
 
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("context done before send could complete: %w", ctx.Err())
+		return newWorkerSendError(
+			dispatchFailureContextDone,
+			fmt.Errorf("context done before send could complete: %w", ctx.Err()),
+		)
 	case err = <-sentCh:
-		return err
+		if err != nil {
+			return newWorkerSendError(streamSendFailureReason(err), err)
+		}
+
+		return nil
 	}
 }
 

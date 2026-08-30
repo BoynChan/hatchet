@@ -857,6 +857,7 @@ func (d *DispatcherImpl) sendTasksToWorker(
 ) error {
 	// get the worker for this task
 	workers, err := d.workers.Get(workerId)
+	lookupFailureReason, lookupFailed := workerLookupFailureReason(err, len(workers))
 
 	if err != nil && !errors.Is(err, ErrWorkerNotFound) {
 		return fmt.Errorf("could not get worker: %w", err)
@@ -881,11 +882,13 @@ func (d *DispatcherImpl) sendTasksToWorker(
 
 			var multiErr error
 			var success bool
+			failureReasons := make([]dispatchFailureReason, 0, len(workers))
 
 			for i, w := range workers {
 				err := w.StartTaskFromBulk(ctx, tenantId, task.V1TaskWithPayload, task.InvocationCount)
 
 				if err != nil {
+					failureReasons = append(failureReasons, workerSendFailureReason(err))
 					multiErr = multierror.Append(
 						multiErr,
 						fmt.Errorf("could not send action for task %s to worker %s (%d / %d): %w", task.ExternalID.String(), workerId, i+1, len(workers), err),
@@ -929,6 +932,28 @@ func (d *DispatcherImpl) sendTasksToWorker(
 			}
 
 			requeue(task.V1Task)
+
+			failureReason := lookupFailureReason
+			if !lookupFailed {
+				failureReason = combinedWorkerSendFailureReason(failureReasons)
+			}
+
+			prometheus.DispatchToWorkerFailures.WithLabelValues(
+				string(failureReason),
+				d.dispatcherId.String(),
+			).Inc()
+
+			d.l.Warn().Ctx(ctx).
+				Err(multiErr).
+				Str("dispatch_failure_reason", string(failureReason)).
+				Str("dispatcher_id", d.dispatcherId.String()).
+				Str("tenant_id", tenantId.String()).
+				Str("worker_id", workerId.String()).
+				Int64("task_id", task.ID).
+				Str("task_external_id", task.ExternalID.String()).
+				Int("worker_session_count", len(workers)).
+				Int("payload_size_bytes", len(task.Payload)).
+				Msg("could not send task to assigned worker")
 
 			return multiErr
 		})
