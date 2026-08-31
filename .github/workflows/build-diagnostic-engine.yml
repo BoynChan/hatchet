@@ -1,0 +1,57 @@
+name: Build diagnostic engine image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git ref containing the engine changes
+        required: true
+        default: boyn/dispatch-failure-reasons
+        type: string
+      image_tag:
+        description: GHCR image tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate image tag
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
+            echo "Invalid image tag: $IMAGE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Clone repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build engine
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          docker build \
+            --file ./build/package/servers.dockerfile \
+            --build-arg SERVER_TARGET=engine \
+            --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
+            --tag "ghcr.io/boynchan/hatchet-engine:$IMAGE_TAG" \
+            .
+
+      - name: Push engine
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: docker push "ghcr.io/boynchan/hatchet-engine:$IMAGE_TAG"
