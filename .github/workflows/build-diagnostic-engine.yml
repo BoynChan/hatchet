@@ -12,6 +12,11 @@ on:
         description: GHCR image tag
         required: true
         type: string
+      engine_version:
+        description: Semantic version embedded in the engine binary
+        required: true
+        default: v0.101.27
+        type: string
 
 permissions:
   contents: read
@@ -21,12 +26,17 @@ jobs:
   build-engine:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate image tag
+      - name: Validate inputs
         env:
+          ENGINE_VERSION: ${{ inputs.engine_version }}
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           if [[ ! "$IMAGE_TAG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
             echo "Invalid image tag: $IMAGE_TAG" >&2
+            exit 1
+          fi
+          if [[ ! "$ENGINE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid engine version: $ENGINE_VERSION" >&2
             exit 1
           fi
 
@@ -42,14 +52,29 @@ jobs:
 
       - name: Build engine
         env:
+          ENGINE_VERSION: ${{ inputs.engine_version }}
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           docker build \
             --file ./build/package/servers.dockerfile \
             --build-arg SERVER_TARGET=engine \
+            --build-arg "VERSION=$ENGINE_VERSION" \
             --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
             --tag "ghcr.io/boynchan/hatchet-engine:$IMAGE_TAG" \
             .
+
+      - name: Verify engine version
+        env:
+          ENGINE_VERSION: ${{ inputs.engine_version }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          actual_version="$(docker run --rm \
+            "ghcr.io/boynchan/hatchet-engine:$IMAGE_TAG" \
+            /hatchet/hatchet-engine --version)"
+          if [[ "$actual_version" != "$ENGINE_VERSION" ]]; then
+            echo "Engine version mismatch: expected $ENGINE_VERSION, got $actual_version" >&2
+            exit 1
+          fi
 
       - name: Push engine
         env:
