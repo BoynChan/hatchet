@@ -56,8 +56,9 @@ func TestWorkerLookupFailureReason(t *testing.T) {
 func TestWorkerRegistryCanRetainAnEmptySessionSet(t *testing.T) {
 	registry := &workers{}
 	workerID := uuid.New()
-	registry.Add(workerID, "session", nil)
-	registry.DeleteForSession(workerID, "session")
+	sessionID := uuid.New()
+	registry.Add(workerID, sessionID, nil)
+	registry.DeleteForSession(workerID, sessionID)
 
 	sessions, err := registry.Get(workerID)
 
