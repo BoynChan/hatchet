@@ -1064,49 +1064,29 @@ WHERE
 RETURNING
     v1_task_runtime.*;
 
--- name: ManualSlotRelease :one
-WITH task AS (
-    SELECT
-        t.id,
-        t.inserted_at,
-        t.retry_count,
-        t.tenant_id
-    FROM
-        v1_lookup_table lt
-    JOIN
-        v1_task t ON t.id = lt.task_id AND t.inserted_at = lt.inserted_at
-    WHERE
-        lt.external_id = @externalId::uuid AND
-        lt.tenant_id = @tenantId::uuid
-), locked_runtime AS (
-    SELECT
-        tr.task_id,
-        tr.task_inserted_at,
-        tr.retry_count,
-        tr.worker_id
-    FROM
-        v1_task_runtime tr
-    WHERE
-        (tr.task_id, tr.task_inserted_at, tr.retry_count) IN (SELECT id, inserted_at, retry_count FROM task)
-    ORDER BY
-        task_id, task_inserted_at, retry_count
-    FOR UPDATE
-), deleted_slots AS (
-    DELETE FROM v1_task_runtime_slot
-    WHERE
-        (task_id, task_inserted_at, retry_count) IN (SELECT task_id, task_inserted_at, retry_count FROM locked_runtime)
-    RETURNING task_id
-)
-UPDATE
-    v1_task_runtime
-SET
-    worker_id = NULL
-FROM
-    task
-WHERE
-    (v1_task_runtime.task_id, v1_task_runtime.task_inserted_at, v1_task_runtime.retry_count) IN (SELECT id, inserted_at, retry_count FROM task)
-RETURNING
-    v1_task_runtime.*;
+-- name: LockTaskRuntimeForSlotRelease :one
+SELECT tr.*
+FROM v1_lookup_table lt
+JOIN v1_task t ON t.id = lt.task_id AND t.inserted_at = lt.inserted_at
+JOIN v1_task_runtime tr ON tr.task_id = t.id
+    AND tr.task_inserted_at = t.inserted_at AND tr.retry_count = t.retry_count
+WHERE lt.external_id = @externalId::uuid AND lt.tenant_id = @tenantId::uuid
+    AND tr.tenant_id = @tenantId::uuid
+FOR UPDATE OF tr;
+
+-- name: DeleteTaskRuntimeSlots :exec
+DELETE FROM v1_task_runtime_slot
+WHERE tenant_id = @tenantId::uuid
+    AND task_id = @taskId::bigint
+    AND task_inserted_at = @taskInsertedAt::timestamptz
+    AND retry_count = @retryCount::integer;
+
+-- name: ManualSlotRelease :exec
+UPDATE v1_task_runtime SET worker_id = NULL
+WHERE tenant_id = @tenantId::uuid
+    AND task_id = @taskId::bigint
+    AND task_inserted_at = @taskInsertedAt::timestamptz
+    AND retry_count = @retryCount::integer;
 
 -- name: EvictTask :one
 -- Marks a task as evicted in v1_task_runtime and releases worker slots.

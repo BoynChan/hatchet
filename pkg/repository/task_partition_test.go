@@ -24,10 +24,15 @@ import (
 )
 
 func setupPostgresWithMigration(t *testing.T) (*pgxpool.Pool, func()) {
+	return setupPostgresImageWithMigration(t, "postgres:15.6")
+}
+
+func setupPostgresImageWithMigration(t *testing.T, image string) (*pgxpool.Pool, func()) {
+	t.Helper()
 	ctx := context.Background()
 
 	postgresContainer, err := postgres.Run(ctx,
-		"postgres:15.6",
+		image,
 		postgres.WithDatabase("hatchet"),
 		postgres.WithUsername("hatchet"),
 		postgres.WithPassword("hatchet"),
