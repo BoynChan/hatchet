@@ -2226,6 +2226,9 @@ func (d *DispatcherImpl) releaseSlot(ctx context.Context, tenant *sqlcv1.Tenant,
 		return nil, err
 	}
 
+	// The repository has committed the release before the scheduler reads capacity.
+	d.notifySlotReleased(ctx, tenant, releasedSlot.Queue)
+
 	workerId := releasedSlot.WorkerID
 
 	// send to the OLAP repository

@@ -1065,7 +1065,7 @@ RETURNING
     v1_task_runtime.*;
 
 -- name: LockTaskRuntimeForSlotRelease :one
-SELECT tr.*
+SELECT tr.*, t.queue
 FROM v1_lookup_table lt
 JOIN v1_task t ON t.id = lt.task_id AND t.inserted_at = lt.inserted_at
 JOIN v1_task_runtime tr ON tr.task_id = t.id

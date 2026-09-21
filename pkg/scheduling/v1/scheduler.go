@@ -63,6 +63,7 @@ type Scheduler struct {
 	// may not be visible to the cycle's availability read, so the rebuild
 	// subtracts them to avoid double-counting capacity.
 	replenishing         bool
+	replenishDone        chan struct{}
 	ackedDuringReplenish map[poolKey]int
 
 	// afterReplenish holds assignment retries parked while a replenish cycle is
@@ -293,6 +294,10 @@ func (s *Scheduler) addWorker(newWorker *v1.ListActiveWorkersResult) {
 // finishes (applied, skipped as empty, or failed).
 func (s *Scheduler) endReplenishCycle() {
 	s.replenishing = false
+	if s.replenishDone != nil {
+		close(s.replenishDone)
+		s.replenishDone = nil
+	}
 	s.ackedDuringReplenish = nil
 
 	// retry assignments that missed capacity while the cycle was in flight
@@ -308,6 +313,16 @@ func (s *Scheduler) endReplenishCycle() {
 // pools. All database reads run outside the run loop, so assignment continues
 // while they are in flight.
 func (s *Scheduler) replenish(ctx context.Context, mustReplenish bool) error {
+	return s.replenishSlots(ctx, mustReplenish, false)
+}
+
+// A release may commit after an in-flight refresh has read the database. Wait
+// for that refresh, then perform a new read before waking the affected queues.
+func (s *Scheduler) replenishAfterRelease(ctx context.Context) error {
+	return s.replenishSlots(ctx, true, true)
+}
+
+func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFreshRead bool) error {
 	ctx, span := telemetry.NewSpan(ctx, "replenish")
 	defer span.End()
 
@@ -320,29 +335,43 @@ func (s *Scheduler) replenish(ctx context.Context, mustReplenish bool) error {
 	// ids, and start counting acks so the availability read below can be
 	// reconciled against assignments that flush while it runs.
 	var workerIds []uuid.UUID
-	skipped := false
+	for {
+		var inFlight <-chan struct{}
+		skipped := false
+		if ok := s.do(ctx, func() {
+			if s.replenishing {
+				skipped = true
+				inFlight = s.replenishDone
+				return
+			}
 
-	if ok := s.do(ctx, func() {
-		if s.replenishing {
-			skipped = true
-			return
+			s.replenishing = true
+			s.replenishDone = make(chan struct{})
+			s.ackedDuringReplenish = make(map[poolKey]int)
+
+			workerIds = make([]uuid.UUID, 0, len(s.workers))
+			for workerId := range s.workers {
+				workerIds = append(workerIds, workerId)
+			}
+		}); !ok {
+			return ctx.Err()
 		}
 
-		s.replenishing = true
-		s.ackedDuringReplenish = make(map[poolKey]int)
-
-		workerIds = make([]uuid.UUID, 0, len(s.workers))
-		for workerId := range s.workers {
-			workerIds = append(workerIds, workerId)
+		if !skipped {
+			break
 		}
-	}); !ok {
-		return ctx.Err()
-	}
-
-	if skipped {
-		s.l.Debug().Ctx(ctx).Msg("skipping replenish because another replenish is in progress")
-		telemetry.WithAttributes(span, telemetry.AttributeKV{Key: "replenish.skipped_in_progress", Value: true})
-		return nil
+		if !waitForFreshRead {
+			s.l.Debug().Ctx(ctx).Msg("skipping replenish because another replenish is in progress")
+			telemetry.WithAttributes(span, telemetry.AttributeKV{Key: "replenish.skipped_in_progress", Value: true})
+			return nil
+		}
+		select {
+		case <-inFlight:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.runDone:
+			return context.Canceled
+		}
 	}
 
 	// every exit path below must clear the replenishing flag; the apply op does

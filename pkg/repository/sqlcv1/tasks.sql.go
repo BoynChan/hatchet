@@ -2791,7 +2791,7 @@ func (q *Queries) LockSignalCreatedEvents(ctx context.Context, db DBTX, arg Lock
 }
 
 const lockTaskRuntimeForSlotRelease = `-- name: LockTaskRuntimeForSlotRelease :one
-SELECT tr.task_id, tr.task_inserted_at, tr.retry_count, tr.worker_id, tr.batch_id, tr.batch_size, tr.batch_index, tr.batch_key, tr.tenant_id, tr.timeout_at, tr.evicted_at
+SELECT tr.task_id, tr.task_inserted_at, tr.retry_count, tr.worker_id, tr.batch_id, tr.batch_size, tr.batch_index, tr.batch_key, tr.tenant_id, tr.timeout_at, tr.evicted_at, t.queue
 FROM v1_lookup_table lt
 JOIN v1_task t ON t.id = lt.task_id AND t.inserted_at = lt.inserted_at
 JOIN v1_task_runtime tr ON tr.task_id = t.id
@@ -2806,9 +2806,24 @@ type LockTaskRuntimeForSlotReleaseParams struct {
 	Tenantid   uuid.UUID `json:"tenantid"`
 }
 
-func (q *Queries) LockTaskRuntimeForSlotRelease(ctx context.Context, db DBTX, arg LockTaskRuntimeForSlotReleaseParams) (*V1TaskRuntime, error) {
+type LockTaskRuntimeForSlotReleaseRow struct {
+	TaskID         int64              `json:"task_id"`
+	TaskInsertedAt pgtype.Timestamptz `json:"task_inserted_at"`
+	RetryCount     int32              `json:"retry_count"`
+	WorkerID       *uuid.UUID         `json:"worker_id"`
+	BatchID        *uuid.UUID         `json:"batch_id"`
+	BatchSize      pgtype.Int4        `json:"batch_size"`
+	BatchIndex     pgtype.Int4        `json:"batch_index"`
+	BatchKey       pgtype.Text        `json:"batch_key"`
+	TenantID       uuid.UUID          `json:"tenant_id"`
+	TimeoutAt      pgtype.Timestamp   `json:"timeout_at"`
+	EvictedAt      pgtype.Timestamptz `json:"evicted_at"`
+	Queue          string             `json:"queue"`
+}
+
+func (q *Queries) LockTaskRuntimeForSlotRelease(ctx context.Context, db DBTX, arg LockTaskRuntimeForSlotReleaseParams) (*LockTaskRuntimeForSlotReleaseRow, error) {
 	row := db.QueryRow(ctx, lockTaskRuntimeForSlotRelease, arg.Externalid, arg.Tenantid)
-	var i V1TaskRuntime
+	var i LockTaskRuntimeForSlotReleaseRow
 	err := row.Scan(
 		&i.TaskID,
 		&i.TaskInsertedAt,
@@ -2821,6 +2836,7 @@ func (q *Queries) LockTaskRuntimeForSlotRelease(ctx context.Context, db DBTX, ar
 		&i.TenantID,
 		&i.TimeoutAt,
 		&i.EvictedAt,
+		&i.Queue,
 	)
 	return &i, err
 }
