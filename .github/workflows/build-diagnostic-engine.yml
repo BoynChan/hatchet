@@ -6,7 +6,7 @@ on:
       source_ref:
         description: Git ref containing the engine changes
         required: true
-        default: boyn/dispatch-failure-reasons
+        default: main
         type: string
       image_tag:
         description: GHCR image tag
@@ -15,7 +15,7 @@ on:
       engine_version:
         description: Semantic version embedded in the engine binary
         required: true
-        default: v0.101.27
+        default: v0.108.0
         type: string
 
 permissions:
