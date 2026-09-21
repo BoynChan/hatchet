@@ -208,7 +208,9 @@ func (p *SchedulingPool) cleanupTenants(toCleanup []*tenantManager) {
 
 func (p *SchedulingPool) Replenish(ctx context.Context, tenantId uuid.UUID) {
 	if tm := p.getTenantManager(tenantId, false); tm != nil {
-		tm.replenish(ctx)
+		if err := tm.scheduler.replenishAfterRelease(ctx); err != nil {
+			tm.l.Error().Err(err).Msg("error refreshing released scheduler capacity")
+		}
 	}
 }
 

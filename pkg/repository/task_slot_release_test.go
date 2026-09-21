@@ -35,6 +35,7 @@ func TestManualSlotRelease(t *testing.T) {
 		require.Equal(t, int32(1), capacity())
 		released, err := repo.ReleaseSlot(ctx, f.tenantID, f.externalID)
 		require.NoError(t, err)
+		require.Equal(t, "release-test", released.Queue)
 		require.NotNil(t, released.WorkerID)
 		require.Equal(t, f.workerID, *released.WorkerID, "release event must identify the worker whose capacity was freed")
 		assertReleasedRuntime(t, pool, f)
