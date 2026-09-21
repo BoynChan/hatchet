@@ -311,6 +311,31 @@ func (q *Queries) DeleteTaskBatchRun(ctx context.Context, db DBTX, arg DeleteTas
 	return err
 }
 
+const deleteTaskRuntimeSlots = `-- name: DeleteTaskRuntimeSlots :exec
+DELETE FROM v1_task_runtime_slot
+WHERE tenant_id = $1::uuid
+    AND task_id = $2::bigint
+    AND task_inserted_at = $3::timestamptz
+    AND retry_count = $4::integer
+`
+
+type DeleteTaskRuntimeSlotsParams struct {
+	Tenantid       uuid.UUID          `json:"tenantid"`
+	Taskid         int64              `json:"taskid"`
+	Taskinsertedat pgtype.Timestamptz `json:"taskinsertedat"`
+	Retrycount     int32              `json:"retrycount"`
+}
+
+func (q *Queries) DeleteTaskRuntimeSlots(ctx context.Context, db DBTX, arg DeleteTaskRuntimeSlotsParams) error {
+	_, err := db.Exec(ctx, deleteTaskRuntimeSlots,
+		arg.Tenantid,
+		arg.Taskid,
+		arg.Taskinsertedat,
+		arg.Retrycount,
+	)
+	return err
+}
+
 const ensureTablePartitionsExist = `-- name: EnsureTablePartitionsExist :one
 WITH tomorrow_date AS (
     SELECT (NOW() + INTERVAL '1 day')::date AS date
@@ -2765,6 +2790,41 @@ func (q *Queries) LockSignalCreatedEvents(ctx context.Context, db DBTX, arg Lock
 	return items, nil
 }
 
+const lockTaskRuntimeForSlotRelease = `-- name: LockTaskRuntimeForSlotRelease :one
+SELECT tr.task_id, tr.task_inserted_at, tr.retry_count, tr.worker_id, tr.batch_id, tr.batch_size, tr.batch_index, tr.batch_key, tr.tenant_id, tr.timeout_at, tr.evicted_at
+FROM v1_lookup_table lt
+JOIN v1_task t ON t.id = lt.task_id AND t.inserted_at = lt.inserted_at
+JOIN v1_task_runtime tr ON tr.task_id = t.id
+    AND tr.task_inserted_at = t.inserted_at AND tr.retry_count = t.retry_count
+WHERE lt.external_id = $1::uuid AND lt.tenant_id = $2::uuid
+    AND tr.tenant_id = $2::uuid
+FOR UPDATE OF tr
+`
+
+type LockTaskRuntimeForSlotReleaseParams struct {
+	Externalid uuid.UUID `json:"externalid"`
+	Tenantid   uuid.UUID `json:"tenantid"`
+}
+
+func (q *Queries) LockTaskRuntimeForSlotRelease(ctx context.Context, db DBTX, arg LockTaskRuntimeForSlotReleaseParams) (*V1TaskRuntime, error) {
+	row := db.QueryRow(ctx, lockTaskRuntimeForSlotRelease, arg.Externalid, arg.Tenantid)
+	var i V1TaskRuntime
+	err := row.Scan(
+		&i.TaskID,
+		&i.TaskInsertedAt,
+		&i.RetryCount,
+		&i.WorkerID,
+		&i.BatchID,
+		&i.BatchSize,
+		&i.BatchIndex,
+		&i.BatchKey,
+		&i.TenantID,
+		&i.TimeoutAt,
+		&i.EvictedAt,
+	)
+	return &i, err
+}
+
 const lookupExternalIds = `-- name: LookupExternalIds :many
 SELECT
     tenant_id, external_id, task_id, dag_id, inserted_at
@@ -2806,73 +2866,29 @@ func (q *Queries) LookupExternalIds(ctx context.Context, db DBTX, arg LookupExte
 	return items, nil
 }
 
-const manualSlotRelease = `-- name: ManualSlotRelease :one
-WITH task AS (
-    SELECT
-        t.id,
-        t.inserted_at,
-        t.retry_count,
-        t.tenant_id
-    FROM
-        v1_lookup_table lt
-    JOIN
-        v1_task t ON t.id = lt.task_id AND t.inserted_at = lt.inserted_at
-    WHERE
-        lt.external_id = $1::uuid AND
-        lt.tenant_id = $2::uuid
-), locked_runtime AS (
-    SELECT
-        tr.task_id,
-        tr.task_inserted_at,
-        tr.retry_count,
-        tr.worker_id
-    FROM
-        v1_task_runtime tr
-    WHERE
-        (tr.task_id, tr.task_inserted_at, tr.retry_count) IN (SELECT id, inserted_at, retry_count FROM task)
-    ORDER BY
-        task_id, task_inserted_at, retry_count
-    FOR UPDATE
-), deleted_slots AS (
-    DELETE FROM v1_task_runtime_slot
-    WHERE
-        (task_id, task_inserted_at, retry_count) IN (SELECT task_id, task_inserted_at, retry_count FROM locked_runtime)
-    RETURNING task_id
-)
-UPDATE
-    v1_task_runtime
-SET
-    worker_id = NULL
-FROM
-    task
-WHERE
-    (v1_task_runtime.task_id, v1_task_runtime.task_inserted_at, v1_task_runtime.retry_count) IN (SELECT id, inserted_at, retry_count FROM task)
-RETURNING
-    v1_task_runtime.task_id, v1_task_runtime.task_inserted_at, v1_task_runtime.retry_count, v1_task_runtime.worker_id, v1_task_runtime.batch_id, v1_task_runtime.batch_size, v1_task_runtime.batch_index, v1_task_runtime.batch_key, v1_task_runtime.tenant_id, v1_task_runtime.timeout_at, v1_task_runtime.evicted_at
+const manualSlotRelease = `-- name: ManualSlotRelease :exec
+UPDATE v1_task_runtime SET worker_id = NULL
+WHERE tenant_id = $1::uuid
+    AND task_id = $2::bigint
+    AND task_inserted_at = $3::timestamptz
+    AND retry_count = $4::integer
 `
 
 type ManualSlotReleaseParams struct {
-	Externalid uuid.UUID `json:"externalid"`
-	Tenantid   uuid.UUID `json:"tenantid"`
+	Tenantid       uuid.UUID          `json:"tenantid"`
+	Taskid         int64              `json:"taskid"`
+	Taskinsertedat pgtype.Timestamptz `json:"taskinsertedat"`
+	Retrycount     int32              `json:"retrycount"`
 }
 
-func (q *Queries) ManualSlotRelease(ctx context.Context, db DBTX, arg ManualSlotReleaseParams) (*V1TaskRuntime, error) {
-	row := db.QueryRow(ctx, manualSlotRelease, arg.Externalid, arg.Tenantid)
-	var i V1TaskRuntime
-	err := row.Scan(
-		&i.TaskID,
-		&i.TaskInsertedAt,
-		&i.RetryCount,
-		&i.WorkerID,
-		&i.BatchID,
-		&i.BatchSize,
-		&i.BatchIndex,
-		&i.BatchKey,
-		&i.TenantID,
-		&i.TimeoutAt,
-		&i.EvictedAt,
+func (q *Queries) ManualSlotRelease(ctx context.Context, db DBTX, arg ManualSlotReleaseParams) error {
+	_, err := db.Exec(ctx, manualSlotRelease,
+		arg.Tenantid,
+		arg.Taskid,
+		arg.Taskinsertedat,
+		arg.Retrycount,
 	)
-	return &i, err
+	return err
 }
 
 const preflightCheckDAGsForReplay = `-- name: PreflightCheckDAGsForReplay :many

@@ -1896,10 +1896,10 @@ func (r *TaskRepositoryImpl) ReleaseSlot(ctx context.Context, tenantId, external
 
 	defer rollback()
 
-	resp, err := r.queries.ManualSlotRelease(
+	resp, err := r.queries.LockTaskRuntimeForSlotRelease(
 		ctx,
 		tx,
-		sqlcv1.ManualSlotReleaseParams{
+		sqlcv1.LockTaskRuntimeForSlotReleaseParams{
 			Tenantid:   tenantId,
 			Externalid: externalId,
 		},
@@ -1909,10 +1909,31 @@ func (r *TaskRepositoryImpl) ReleaseSlot(ctx context.Context, tenantId, external
 		return nil, err
 	}
 
+	// Hold the runtime lock until both writes commit. Separate statements ensure
+	// reservations are deleted before the runtime is detached from its worker.
+	if err := r.queries.DeleteTaskRuntimeSlots(ctx, tx, sqlcv1.DeleteTaskRuntimeSlotsParams{
+		Tenantid:       tenantId,
+		Taskid:         resp.TaskID,
+		Taskinsertedat: resp.TaskInsertedAt,
+		Retrycount:     resp.RetryCount,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := r.queries.ManualSlotRelease(ctx, tx, sqlcv1.ManualSlotReleaseParams{
+		Tenantid:       tenantId,
+		Taskid:         resp.TaskID,
+		Taskinsertedat: resp.TaskInsertedAt,
+		Retrycount:     resp.RetryCount,
+	}); err != nil {
+		return nil, err
+	}
+
 	if err := commit(ctx); err != nil {
 		return nil, err
 	}
 
+	// Keep the previous worker on the returned snapshot for the release event.
 	return resp, nil
 }
 
