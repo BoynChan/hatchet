@@ -610,6 +610,7 @@ func (tc *TasksControllerImpl) handleTaskCompleted(ctx context.Context, tenantId
 
 	opts := make([]v1.CompleteTaskOpts, 0)
 	outputByTaskId := make(map[int64]string)
+	workerByAttempt := make(map[completionAttempt]uuid.UUID)
 
 	msgs := msgqueue.JSONConvert[tasktypes.CompletedTaskPayload](payloads)
 
@@ -624,6 +625,8 @@ func (tc *TasksControllerImpl) handleTaskCompleted(ctx context.Context, tenantId
 		})
 
 		outputByTaskId[msg.TaskId] = string(msg.Output)
+		worker, _ := uuid.Parse(msg.WorkerId)
+		workerByAttempt[completionAttempt{msg.TaskId, msg.InsertedAt.Time.UnixMicro(), msg.RetryCount}] = worker
 	}
 
 	res, err := tc.repov1.Tasks().CompleteTasks(ctx, tenantId, opts)
@@ -640,8 +643,11 @@ func (tc *TasksControllerImpl) handleTaskCompleted(ctx context.Context, tenantId
 
 	for _, released := range res.ReleasedTasks {
 		prometheus.SucceededTasks.Inc()
-		if tenantMetricsEnabled && released.WorkerID != uuid.Nil && !released.IsDagOrchestrator {
-			prometheus.EventHooks.RecordCompletion(tenantId.String(), released.Queue, released.WorkerID.String(), released.IsCurrentRetry)
+		if tenantMetricsEnabled {
+			reportedWorker := workerByAttempt[completionAttempt{released.ID, released.InsertedAt.Time.UnixMicro(), released.RetryCount}]
+			if worker := completionMetricWorker(released, reportedWorker); worker != uuid.Nil {
+				prometheus.EventHooks.RecordCompletion(tenantId.String(), released.Queue, worker.String(), true)
+			}
 		}
 		if tenantMetricsEnabled {
 			prometheus.TenantSucceededTasks.WithLabelValues(tenantId.String()).Inc()

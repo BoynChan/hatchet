@@ -58,6 +58,9 @@ type CompletedTaskPayload struct {
 	// (required) the retry count
 	RetryCount int32
 
+	// The reporting worker is retained after manual slot release detaches the runtime.
+	WorkerId string `json:"worker_id,omitempty"`
+
 	// (optional) the output data
 	Output []byte
 }
@@ -70,6 +73,7 @@ func CompletedTaskMessage(
 	workflowRunId uuid.UUID,
 	retryCount int32,
 	output []byte,
+	workerId string,
 ) (*msgqueue.Message, error) {
 	return msgqueue.NewTenantMessage(
 		tenantId,
@@ -83,6 +87,7 @@ func CompletedTaskMessage(
 			WorkflowRunId: workflowRunId,
 			RetryCount:    retryCount,
 			Output:        output,
+			WorkerId:      workerId,
 		},
 	)
 }

@@ -49,7 +49,7 @@ func TestEventHooksFailureFreeDispatchExportsZeroFailures(t *testing.T) {
 
 func TestEventHooksCompletionIgnoresReleasedRuntimeRedeliveryAndStaleAttempts(t *testing.T) {
 	m := newEventMetrics(prometheus.NewRegistry())
-	// The committed release returns a worker even after an early slot release.
+	// The controller supplies the reporting worker after an early slot release.
 	m.RecordCompletion("tenant", "queue", "worker", true)
 	// A redelivery after runtime deletion no longer has a worker to release.
 	m.RecordCompletion("tenant", "queue", "", true)
