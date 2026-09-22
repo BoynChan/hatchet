@@ -72,6 +72,7 @@ type DispatcherImpl struct {
 	dispatcherId                        uuid.UUID
 	refreshTimeoutGroup                 singleflight.Group
 	refreshTimeoutBuf                   *refreshTimeoutBuffer
+	promGate                            *prometheus.Gate
 }
 
 // CancelStreamSessions hangs up all registered long-lived subscriber streams. It is
@@ -355,6 +356,7 @@ func New(fs ...DispatcherOpt) (*DispatcherImpl, error) {
 		om:                                  om,
 		refreshTimeoutBuf:                   newRefreshTimeoutBuffer(),
 		serviceV1:                           newDispatcherService(opts.repov1, opts.mqv1, opts.pubsub, v, opts.l, opts.dispatcherId, opts.analytics, opts.promGate),
+		promGate:                            opts.promGate,
 	}, nil
 }
 
@@ -1034,6 +1036,7 @@ func (d *DispatcherImpl) sendTasksToWorker(
 	// get the worker for this task
 	workers, err := d.workers.Get(workerId)
 	lookupFailureReason, lookupFailed := workerLookupFailureReason(err, len(workers))
+	tenantMetricsEnabled := d.promGate.Enabled(ctx, tenantId)
 
 	if err != nil && !errors.Is(err, ErrWorkerNotFound) {
 		return fmt.Errorf("could not get worker: %w", err)
@@ -1076,6 +1079,9 @@ func (d *DispatcherImpl) sendTasksToWorker(
 			}
 
 			if success {
+				if tenantMetricsEnabled {
+					prometheus.EventHooks.RecordDispatch(tenantId.String(), task.Queue, workerId.String(), task.RetryCount, true)
+				}
 				var durableInvCount int32
 				if task.InvocationCount != nil {
 					durableInvCount = *task.InvocationCount
@@ -1109,6 +1115,9 @@ func (d *DispatcherImpl) sendTasksToWorker(
 
 			requeue(task.V1Task)
 
+			if tenantMetricsEnabled {
+				prometheus.EventHooks.RecordDispatch(tenantId.String(), task.Queue, workerId.String(), task.RetryCount, false)
+			}
 			failureReason := lookupFailureReason
 			if !lookupFailed {
 				failureReason = combinedWorkerSendFailureReason(failureReasons)
