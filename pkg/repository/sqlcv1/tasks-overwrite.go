@@ -840,6 +840,7 @@ SELECT
     r.batch_key,
     i.retry_count::int AS retry_count,
     t.retry_count = i.retry_count AS is_current_retry,
+    r.task_id IS NOT NULL AS had_runtime,
     t.concurrency_strategy_ids,
 	t.idempotency_key,
     t.is_dag_orchestrator
@@ -869,6 +870,7 @@ type ReleaseTasksRow struct {
 	BatchKey               pgtype.Text        `json:"batch_key"`
 	RetryCount             int32              `json:"retry_count"`
 	IsCurrentRetry         bool               `json:"is_current_retry"`
+	HadRuntime             bool               `json:"had_runtime"`
 	ConcurrencyStrategyIds []int64            `json:"concurrency_strategy_ids"`
 	IdempotencyKey         pgtype.Text        `json:"idempotency_key"`
 	IsDagOrchestrator      bool               `json:"is_dag_orchestrator"`
@@ -902,6 +904,7 @@ func (q *Queries) ReleaseTasks(ctx context.Context, db DBTX, arg ReleaseTasksPar
 				&i.BatchKey,
 				&i.RetryCount,
 				&i.IsCurrentRetry,
+				&i.HadRuntime,
 				&i.ConcurrencyStrategyIds,
 				&i.IdempotencyKey,
 				&i.IsDagOrchestrator,

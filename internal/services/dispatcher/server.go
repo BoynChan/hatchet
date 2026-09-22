@@ -1568,6 +1568,7 @@ func (s *DispatcherImpl) handleTaskCompleted(inputCtx context.Context, task *sql
 		task.WorkflowRunID,
 		retryCount,
 		[]byte(request.EventPayload),
+		request.WorkerId,
 	)
 
 	if err != nil {
@@ -1902,6 +1903,7 @@ func (s *DispatcherImpl) handleBatchTaskCompleted(
 				WorkflowRunId: task.WorkflowRunID,
 				RetryCount:    retryCount,
 				Output:        []byte(item.EventPayload),
+				WorkerId:      request.WorkerId,
 			})
 		}
 

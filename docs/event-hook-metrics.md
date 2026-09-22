@@ -22,9 +22,12 @@ as `hatchet_dispatch_to_worker_failures_total`.
   crash between commit and observation or before a scrape can lose an increment.
   Prometheus counter reset handling cannot recover such increments.
 - The completion hook runs after commit. A completion redelivery whose runtime
-  was already deleted has no worker and is skipped; stale retry completions are
-  skipped. Early slot release removes slot rows while preserving runtime identity,
-  so a later completion is still counted.
+  was already deleted is skipped using runtime presence returned by the existing
+  release query; stale retry completions are skipped. Early slot release clears
+  the runtime worker ID, so completion messages retain the reporting worker for
+  attribution after commit. This adds no SQL round trip or schema migration.
+  During a rolling upgrade, old dispatchers do not supply this optional field;
+  early-release completions from those messages remain unattributed.
 - Dispatch counts represent attempts, including redelivery. `sent` means the
   existing send path returned success, **not** a worker acknowledgement. Existing
   deadline/uncertain-delivery behavior is unchanged. The separate `START_BATCH`
