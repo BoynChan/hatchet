@@ -181,6 +181,7 @@ require (
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/labstack/gommon v0.5.0 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect

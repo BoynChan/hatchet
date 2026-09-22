@@ -459,6 +459,18 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 	ctx, span := telemetry.NewSpan(ctx, "schedule-step-runs")
 	defer span.End()
 
+	// Both optimistic and queued scheduling publish only committed assignments.
+	if s.promGate.Enabled(ctx, tenantId) {
+		now := time.Now()
+		for _, assigned := range res.Assigned {
+			if assigned == nil || assigned.QueueItem == nil || !assigned.QueueItem.TaskInsertedAt.Valid {
+				continue
+			}
+			qi := assigned.QueueItem
+			prometheus.EventHooks.RecordAssignment(tenantId.String(), qi.Queue, qi.RetryCount, qi.TaskInsertedAt.Time, now)
+		}
+	}
+
 	var outerErr error
 
 	if len(res.Buffered) > 0 {

@@ -638,8 +638,11 @@ func (tc *TasksControllerImpl) handleTaskCompleted(ctx context.Context, tenantId
 	// instrumentation
 	tenantMetricsEnabled := tc.promGate.Enabled(ctx, tenantId)
 
-	for range res.ReleasedTasks {
+	for _, released := range res.ReleasedTasks {
 		prometheus.SucceededTasks.Inc()
+		if tenantMetricsEnabled && released.WorkerID != uuid.Nil && !released.IsDagOrchestrator {
+			prometheus.EventHooks.RecordCompletion(tenantId.String(), released.Queue, released.WorkerID.String(), released.IsCurrentRetry)
+		}
 		if tenantMetricsEnabled {
 			prometheus.TenantSucceededTasks.WithLabelValues(tenantId.String()).Inc()
 		}
