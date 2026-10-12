@@ -146,6 +146,7 @@ type Scheduler struct {
 	signaler *signal.OLAPSignaler
 
 	tasksWithNoWorkerCache *expirable.LRU[string, struct{}]
+	rateLimitedTasksCache  *expirable.LRU[string, struct{}]
 
 	promGate *prometheus.Gate
 
@@ -194,6 +195,7 @@ func New(
 
 	// TODO: replace with config or pull into a constant
 	tasksWithNoWorkerCache := expirable.NewLRU(10000, func(string, struct{}) {}, 5*time.Minute)
+	rateLimitedTasksCache := expirable.NewLRU(10000, func(string, struct{}) {}, 1*time.Minute)
 
 	signaler := signal.NewOLAPSignaler(opts.mq, opts.pubsub, opts.repov1, opts.l, pubBuffer, opts.promGate)
 
@@ -210,6 +212,7 @@ func New(
 		ql:                     opts.queueLogger,
 		pool:                   opts.pool,
 		tasksWithNoWorkerCache: tasksWithNoWorkerCache,
+		rateLimitedTasksCache:  rateLimitedTasksCache,
 		signaler:               signaler,
 		promGate:               opts.promGate,
 		queueMetrics:           newQueueMetricsPoller(opts.repov1.Tasks(), opts.l),
@@ -625,6 +628,12 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 
 	if len(res.RateLimited) > 0 {
 		for _, rateLimited := range res.RateLimited {
+			cacheKey := fmt.Sprintf("%d:%d", rateLimited.TaskId, rateLimited.RetryCount)
+
+			if _, ok := s.rateLimitedTasksCache.Get(cacheKey); ok {
+				continue
+			}
+
 			message := fmt.Sprintf(
 				"Rate limit exceeded for key %s, attempting to consume %d units, but only had %d remaining",
 				rateLimited.ExceededKey,
@@ -658,6 +667,8 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 			if err != nil {
 				outerErr = multierror.Append(outerErr, fmt.Errorf("could not send cancelled task: %w", err))
 			}
+
+			s.rateLimitedTasksCache.Add(cacheKey, struct{}{})
 		}
 	}
 
@@ -853,6 +864,7 @@ func (s *Scheduler) internalRetry(ctx context.Context, tenantId uuid.UUID, assig
 			false,
 			"could not assign step run to worker",
 			false,
+			nil,
 		)
 
 		if err != nil {
@@ -1401,6 +1413,7 @@ func (s *Scheduler) handleDeadLetteredTaskBulkAssigned(ctx context.Context, msg 
 			false,
 			"Could not send task to worker",
 			false,
+			nil,
 		)
 
 		if err != nil {
@@ -1451,6 +1464,7 @@ func (s *Scheduler) handleDeadLetteredBatchStart(ctx context.Context, msg *msgqu
 			false,
 			"Could not send task to worker",
 			false,
+			nil,
 		)
 
 		if err != nil {
@@ -1478,6 +1492,20 @@ func (s *Scheduler) handleDeadLetteredBatchStart(ctx context.Context, msg *msgqu
 // GetSatisfiedDurableEvents poll on wait re-registration, timeout reassignment of the orphaned
 // task, or the OLAP reconcile sweeps.
 const maxDurableCallbackRedeliveries = 50
+
+// The dispatcher publishes undelivered callbacks straight to the dead-letter queue, which has no
+// message TTL, so without a delay here the whole retry budget is spent within a second, before a
+// reconnecting worker has had a chance to re-register its session.
+const (
+	durableCallbackRedeliveryBaseDelay = 100 * time.Millisecond
+	durableCallbackRedeliveryMaxDelay  = 5 * time.Second
+)
+
+func durableCallbackRedeliveryDelay(redeliveryCount int32) time.Duration {
+	delay := durableCallbackRedeliveryBaseDelay << min(redeliveryCount, 10)
+
+	return min(delay, durableCallbackRedeliveryMaxDelay)
+}
 
 func (s *Scheduler) handleDeadLetteredDurableCallbackCompleted(ctx context.Context, msg *msgqueue.Message) error {
 	payloads := msgqueue.JSONConvert[tasktypes.DurableCallbackCompletedPayload](msg.Payloads)
@@ -1523,6 +1551,24 @@ func (s *Scheduler) handleDeadLetteredDurableCallbackCompleted(ctx context.Conte
 			ChildTaskErrorMessage: p.ChildTaskErrorMessage,
 			RedeliveryCount:       p.RedeliveryCount + 1,
 		})
+	}
+
+	if len(callbacks) == 0 {
+		return nil
+	}
+
+	var maxRedeliveryCount int32
+
+	for _, cb := range callbacks {
+		maxRedeliveryCount = max(maxRedeliveryCount, cb.RedeliveryCount)
+	}
+
+	// the dead-letter message stays unacknowledged while we wait, so a scheduler that stops
+	// mid-delay has the message redelivered instead of losing the callbacks
+	select {
+	case <-time.After(durableCallbackRedeliveryDelay(maxRedeliveryCount)):
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
 	return durable.DispatchCallbacks(ctx, s.l, s.mq, s.repov1, msg.TenantID, callbacks)
