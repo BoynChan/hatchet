@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	queueMetricsPollInterval = 15 * time.Second
+	queueMetricsPollInterval = 1 * time.Second
 
 	// queueMetricsPollTimeout bounds one full polling pass. The per-tenant aggregate
 	// queries scan the tenant's queue items, so a pass over all tenants on the partition
