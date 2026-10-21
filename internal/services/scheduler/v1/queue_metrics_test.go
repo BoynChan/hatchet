@@ -125,13 +125,14 @@ func TestQueueMetricsPollerLifecycle(t *testing.T) {
 
 	// a reported backlog sets the gauges
 	p.applyQueueSizes(tenantId, []*sqlcv1.GetQueueSizesRow{
-		{Queue: "default", WorkflowName: "my-workflow", Count: 5},
+		{Queue: "default", WorkflowName: "my-workflow", Count: 5, OldestAgeSeconds: 12.5},
 	})
 	p.applyMetadataSizes(tenantId, []*sqlcv1.GetQueueSizesByMetadataRow{
 		{Queue: "default", Key: "prom_product", Value: "search", Count: 3},
 	})
 
 	assert.Equal(t, map[string]float64{"queue=default,workflow_name=my-workflow": 5}, collectGaugeSeries(t, prometheus.TenantQueueSize, tenantIdStr))
+	assert.Equal(t, map[string]float64{"queue=default,workflow_name=my-workflow": 12.5}, collectGaugeSeries(t, prometheus.TenantQueueOldestItemAge, tenantIdStr))
 	assert.Equal(t, map[string]float64{"key=prom_product,queue=default,value=search": 3}, collectGaugeSeries(t, prometheus.TenantQueueSizeByMetadata, tenantIdStr))
 
 	// a drained queue reports zero for one poll
@@ -139,6 +140,7 @@ func TestQueueMetricsPollerLifecycle(t *testing.T) {
 	p.applyMetadataSizes(tenantId, nil)
 
 	assert.Equal(t, map[string]float64{"queue=default,workflow_name=my-workflow": 0}, collectGaugeSeries(t, prometheus.TenantQueueSize, tenantIdStr))
+	assert.Equal(t, map[string]float64{"queue=default,workflow_name=my-workflow": 0}, collectGaugeSeries(t, prometheus.TenantQueueOldestItemAge, tenantIdStr))
 	assert.Equal(t, map[string]float64{"key=prom_product,queue=default,value=search": 0}, collectGaugeSeries(t, prometheus.TenantQueueSizeByMetadata, tenantIdStr))
 
 	// and is deleted on the poll after
@@ -146,6 +148,7 @@ func TestQueueMetricsPollerLifecycle(t *testing.T) {
 	p.applyMetadataSizes(tenantId, nil)
 
 	assert.Empty(t, collectGaugeSeries(t, prometheus.TenantQueueSize, tenantIdStr))
+	assert.Empty(t, collectGaugeSeries(t, prometheus.TenantQueueOldestItemAge, tenantIdStr))
 	assert.Empty(t, collectGaugeSeries(t, prometheus.TenantQueueSizeByMetadata, tenantIdStr))
 	assert.Empty(t, p.knownQueueSizes)
 	assert.Empty(t, p.knownMetadataSizes)

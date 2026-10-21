@@ -949,6 +949,7 @@ func TestScheduler_GetSnapshotInput_DerivesUsedSlotsFromCapacity(t *testing.T) {
 		},
 	})
 
+	s.setQueues([]string{"B", "A"})
 	s.setWorkers([]*repo.ListActiveWorkersResult{{
 		ID:               workerId,
 		Name:             "w1",
@@ -960,9 +961,11 @@ func TestScheduler_GetSnapshotInput_DerivesUsedSlotsFromCapacity(t *testing.T) {
 	in, ok := s.getSnapshotInput(context.Background())
 	require.True(t, ok)
 	require.NotNil(t, in)
+	require.Equal(t, []string{"A", "B"}, in.Queues)
 	require.Len(t, in.Workers, 1)
 	require.Equal(t, workerId, in.Workers[workerId].WorkerId)
 	require.Equal(t, 15, in.Workers[workerId].MaxRuns)
+	require.Equal(t, []string{"A"}, in.Workers[workerId].Actions)
 
 	util := in.WorkerSlotUtilization[workerId]
 	require.NotNil(t, util)

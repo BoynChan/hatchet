@@ -7,6 +7,7 @@ import (
 
 type worker struct {
 	*v1.ListActiveWorkersResult
+	actions []string
 }
 
 // computeWeight computes the weight of a worker based on the desired labels. If the worker does not

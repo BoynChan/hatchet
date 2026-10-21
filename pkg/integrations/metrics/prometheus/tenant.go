@@ -31,6 +31,11 @@ const (
 	TenantAvailableWorkerLabelSlotsTotal        TenantHatchetMetric = "hatchet_tenant_available_worker_label_slots"
 	TenantWorkerLabelSlotsTotal                 TenantHatchetMetric = "hatchet_tenant_worker_label_slots"
 	TenantQueueSizeTotal                        TenantHatchetMetric = "hatchet_tenant_queue_size"
+	TenantQueueOldestItemAgeSeconds             TenantHatchetMetric = "hatchet_tenant_queue_oldest_item_age_seconds"
+	TenantQueueActiveWorkersTotal               TenantHatchetMetric = "hatchet_tenant_queue_active_workers"
+	TenantQueueWorkerSlotsTotal                 TenantHatchetMetric = "hatchet_tenant_queue_worker_slots"
+	TenantQueueUsedWorkerSlotsTotal             TenantHatchetMetric = "hatchet_tenant_queue_used_worker_slots"
+	TenantQueueAvailableWorkerSlotsTotal        TenantHatchetMetric = "hatchet_tenant_queue_available_worker_slots"
 	TenantAdditionalMetadataQueueSize           TenantHatchetMetric = "hatchet_tenant_additional_metadata_queue_size"
 )
 
@@ -202,6 +207,46 @@ var (
 			Help: "Number of queued items per queue and workflow",
 		},
 		[]string{"tenant_id", "queue", "workflow_name"},
+	)
+
+	TenantQueueOldestItemAge = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: string(TenantQueueOldestItemAgeSeconds),
+			Help: "Age in seconds of the oldest queued item per queue and workflow",
+		},
+		[]string{"tenant_id", "queue", "workflow_name"},
+	)
+
+	TenantQueueActiveWorkers = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: string(TenantQueueActiveWorkersTotal),
+			Help: "Number of active workers per queue",
+		},
+		[]string{"tenant_id", "queue"},
+	)
+
+	TenantQueueWorkerSlots = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: string(TenantQueueWorkerSlotsTotal),
+			Help: "Total number of worker slots per queue",
+		},
+		[]string{"tenant_id", "queue"},
+	)
+
+	TenantQueueUsedWorkerSlots = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: string(TenantQueueUsedWorkerSlotsTotal),
+			Help: "Number of used worker slots per queue",
+		},
+		[]string{"tenant_id", "queue"},
+	)
+
+	TenantQueueAvailableWorkerSlots = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: string(TenantQueueAvailableWorkerSlotsTotal),
+			Help: "Number of available worker slots per queue",
+		},
+		[]string{"tenant_id", "queue"},
 	)
 
 	TenantQueueSizeByMetadata = promauto.NewGaugeVec(

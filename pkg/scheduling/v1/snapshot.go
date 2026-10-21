@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -74,9 +75,15 @@ func (s *Scheduler) getSnapshotInput(ctx context.Context) (*SnapshotInput, bool)
 func (s *Scheduler) buildSnapshotInput() *SnapshotInput {
 	res := &SnapshotInput{
 		Workers:                     make(map[uuid.UUID]*WorkerCp, len(s.workers)),
+		Queues:                      make([]string, 0, len(s.queues)),
 		WorkerSlotUtilization:       make(map[uuid.UUID]*SlotUtilization, len(s.workers)),
 		WorkerSlotUtilizationByType: make(map[uuid.UUID]map[string]*SlotUtilization, len(s.workers)),
 	}
+
+	for queueName := range s.queues {
+		res.Queues = append(res.Queues, queueName)
+	}
+	slices.Sort(res.Queues)
 
 	for workerId, worker := range s.workers {
 		totalSlots := 0
@@ -90,6 +97,7 @@ func (s *Scheduler) buildSnapshotInput() *SnapshotInput {
 			Labels:   worker.Labels,
 			Name:     worker.Name,
 			MaxRuns:  totalSlots,
+			Actions:  slices.Clone(worker.actions),
 		}
 	}
 

@@ -17,6 +17,7 @@ type PrometheusExtension struct {
 	tenants                map[uuid.UUID]*sqlcv1.Tenant
 	tenantIdToWorkerLabels map[uuid.UUID]map[WorkerPromLabels]struct{}
 	tenantIdToLabelPairs   map[uuid.UUID]map[LabelPairPromLabels]struct{}
+	tenantIdToQueues       map[uuid.UUID]map[string]struct{}
 
 	promGate *prometheus.Gate
 }
@@ -26,6 +27,7 @@ func NewPrometheusExtension(promGate *prometheus.Gate) *PrometheusExtension {
 		tenants:                make(map[uuid.UUID]*sqlcv1.Tenant),
 		tenantIdToWorkerLabels: make(map[uuid.UUID]map[WorkerPromLabels]struct{}),
 		tenantIdToLabelPairs:   make(map[uuid.UUID]map[LabelPairPromLabels]struct{}),
+		tenantIdToQueues:       make(map[uuid.UUID]map[string]struct{}),
 		promGate:               promGate,
 	}
 }
@@ -54,6 +56,13 @@ type WorkerLabelPair struct {
 type LabelPairPromLabels struct {
 	WorkerLabelPair
 	SlotType string
+}
+
+type QueueSlotUtilization struct {
+	ActiveWorkers    int
+	UtilizedSlots    int
+	NonUtilizedSlots int
+	HasWarmedWorker  bool
 }
 
 func workerLabelPairs(labels []*sqlcv1.ListManyWorkerLabelsRow) []WorkerLabelPair {
@@ -103,6 +112,16 @@ func (p *PrometheusExtension) ReportSnapshot(ctx context.Context, tenantId uuid.
 
 	workerPromLabelsToSlotData := make(map[WorkerPromLabels]*SlotUtilization)
 	labelPairsToSlotData := make(map[LabelPairPromLabels]*SlotUtilization)
+	queueToSlotData := make(map[string]*QueueSlotUtilization, len(input.Queues))
+
+	for _, queueName := range input.Queues {
+		if queueName == "" {
+			continue
+		}
+		queueToSlotData[queueName] = &QueueSlotUtilization{}
+	}
+
+	workersWithActions := 0
 
 	for workerId, utilization := range input.WorkerSlotUtilization {
 		worker, ok := input.Workers[workerId]
@@ -123,6 +142,34 @@ func (p *PrometheusExtension) ReportSnapshot(ctx context.Context, tenantId uuid.
 			workerPromLabelsToSlotData[promLabels] = &SlotUtilization{
 				UtilizedSlots:    utilization.UtilizedSlots,
 				NonUtilizedSlots: utilization.NonUtilizedSlots,
+			}
+		}
+
+		if len(worker.Actions) > 0 {
+			workersWithActions++
+			seenActions := make(map[string]struct{}, len(worker.Actions))
+			warmed := utilization.UtilizedSlots+utilization.NonUtilizedSlots > 0
+
+			for _, actionId := range worker.Actions {
+				if actionId == "" {
+					continue
+				}
+				if _, seen := seenActions[actionId]; seen {
+					continue
+				}
+				seenActions[actionId] = struct{}{}
+
+				qData, ok := queueToSlotData[actionId]
+				if !ok {
+					qData = &QueueSlotUtilization{}
+					queueToSlotData[actionId] = qData
+				}
+				qData.ActiveWorkers++
+				if warmed {
+					qData.UtilizedSlots += utilization.UtilizedSlots
+					qData.NonUtilizedSlots += utilization.NonUtilizedSlots
+					qData.HasWarmedWorker = true
+				}
 			}
 		}
 
@@ -218,6 +265,47 @@ func (p *PrometheusExtension) ReportSnapshot(ctx context.Context, tenantId uuid.
 
 	p.tenantIdToWorkerLabels[tenantId] = currentWorkers
 	p.tenantIdToLabelPairs[tenantId] = currentPairs
+
+	// When workers are present but none has loaded its action set yet (between
+	// initial worker discovery and the first replenish cycle), skip updating per-queue
+	// gauges so leased queues do not transiently report 0 active workers.
+	if len(input.Workers) == 0 || workersWithActions > 0 {
+		if known, ok := p.tenantIdToQueues[tenantId]; ok {
+			for queueName := range known {
+				if _, stillActive := queueToSlotData[queueName]; !stillActive {
+					prometheus.TenantQueueActiveWorkers.DeleteLabelValues(tenantIdStr, queueName)
+					prometheus.TenantQueueWorkerSlots.DeleteLabelValues(tenantIdStr, queueName)
+					prometheus.TenantQueueUsedWorkerSlots.DeleteLabelValues(tenantIdStr, queueName)
+					prometheus.TenantQueueAvailableWorkerSlots.DeleteLabelValues(tenantIdStr, queueName)
+				}
+			}
+		}
+
+		currentQueues := make(map[string]struct{}, len(queueToSlotData))
+		for queueName, qData := range queueToSlotData {
+			currentQueues[queueName] = struct{}{}
+
+			if !tenantMetricsEnabled {
+				continue
+			}
+
+			prometheus.TenantQueueActiveWorkers.WithLabelValues(tenantIdStr, queueName).Set(float64(qData.ActiveWorkers))
+
+			// Preserve previous slot values during transient replenishment gaps when
+			// active workers exist on the queue but none has warmed slots yet.
+			if qData.ActiveWorkers > 0 && !qData.HasWarmedWorker {
+				continue
+			}
+
+			usedSlots := float64(qData.UtilizedSlots)
+			availableSlots := float64(qData.NonUtilizedSlots)
+			prometheus.TenantQueueWorkerSlots.WithLabelValues(tenantIdStr, queueName).Set(usedSlots + availableSlots)
+			prometheus.TenantQueueUsedWorkerSlots.WithLabelValues(tenantIdStr, queueName).Set(usedSlots)
+			prometheus.TenantQueueAvailableWorkerSlots.WithLabelValues(tenantIdStr, queueName).Set(availableSlots)
+		}
+
+		p.tenantIdToQueues[tenantId] = currentQueues
+	}
 }
 
 func (p *PrometheusExtension) PostAssign(tenantId uuid.UUID, input *PostAssignInput) {}
@@ -245,6 +333,17 @@ func (p *PrometheusExtension) deleteGaugesForTenant(tenantId uuid.UUID) {
 		delete(p.tenantIdToLabelPairs, tenantId)
 	}
 
+	if known, ok := p.tenantIdToQueues[tenantId]; ok {
+		for queueName := range known {
+			prometheus.TenantQueueActiveWorkers.DeleteLabelValues(tenantIdStr, queueName)
+			prometheus.TenantQueueWorkerSlots.DeleteLabelValues(tenantIdStr, queueName)
+			prometheus.TenantQueueUsedWorkerSlots.DeleteLabelValues(tenantIdStr, queueName)
+			prometheus.TenantQueueAvailableWorkerSlots.DeleteLabelValues(tenantIdStr, queueName)
+		}
+
+		delete(p.tenantIdToQueues, tenantId)
+	}
+
 	delete(p.tenants, tenantId)
 }
 
@@ -268,8 +367,13 @@ func (p *PrometheusExtension) Cleanup() error {
 		p.deleteGaugesForTenant(tenantId)
 	}
 
+	for tenantId := range p.tenantIdToQueues {
+		p.deleteGaugesForTenant(tenantId)
+	}
+
 	p.tenants = make(map[uuid.UUID]*sqlcv1.Tenant)
 	p.tenantIdToWorkerLabels = make(map[uuid.UUID]map[WorkerPromLabels]struct{})
 	p.tenantIdToLabelPairs = make(map[uuid.UUID]map[LabelPairPromLabels]struct{})
+	p.tenantIdToQueues = make(map[uuid.UUID]map[string]struct{})
 	return nil
 }

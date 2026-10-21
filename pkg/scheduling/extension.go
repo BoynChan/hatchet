@@ -19,6 +19,9 @@ type PostAssignInput struct {
 type SnapshotInput struct {
 	Workers map[uuid.UUID]*WorkerCp
 
+	// Queues is the set of queue names leased by the scheduler for the tenant.
+	Queues []string
+
 	// WorkerSlotUtilization is the per-worker slot utilization summed across slot types.
 	WorkerSlotUtilization map[uuid.UUID]*SlotUtilization
 
@@ -36,6 +39,7 @@ type WorkerCp struct {
 	MaxRuns  int
 	Labels   []*sqlcv1.ListManyWorkerLabelsRow
 	Name     string
+	Actions  []string
 }
 
 type SlotCp struct {

@@ -254,6 +254,8 @@ func (t *tenantManager) listenForBatchLeases(ctx context.Context) {
 }
 
 func (t *tenantManager) setQueuers(queueNames []string) {
+	t.scheduler.setQueues(queueNames)
+
 	t.queuersMu.Lock()
 	defer t.queuersMu.Unlock()
 
@@ -287,6 +289,8 @@ func (t *tenantManager) setQueuers(queueNames []string) {
 }
 
 func (t *tenantManager) addQueuer(queueName string) {
+	t.scheduler.addQueue(queueName)
+
 	t.queuersMu.Lock()
 
 	for _, q := range t.queuers {
