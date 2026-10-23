@@ -62,12 +62,27 @@ func (p *Populator) populate(c echo.Context, r *middleware.RouteInfo) error {
 		keysToIds[paramName] = c.Param(paramName)
 	}
 
+	resources := r.Resources
+	if r.OperationID == "V1WorkflowRunGetStatus" || r.OperationID == "v1-workflow-run:get-status" {
+		if id, ok := keysToIds["v1-workflow-run"]; ok && id != "" {
+			keysToIds["v1-workflow-run-status"] = id
+		}
+		resources = make([]string, len(r.Resources))
+		for i, resKey := range r.Resources {
+			if resKey == "v1-workflow-run" {
+				resources[i] = "v1-workflow-run-status"
+			} else {
+				resources[i] = resKey
+			}
+		}
+	}
+
 	rootResource := &resource{}
 	currResource := rootResource
 	var prevResource *resource
 
 	// loop through the requested resources, adding params as ids
-	for _, resourceKey := range r.Resources {
+	for _, resourceKey := range resources {
 		currResource.ResourceKey = resourceKey
 
 		if resourceId, exists := keysToIds[resourceKey]; exists && resourceId != "" {

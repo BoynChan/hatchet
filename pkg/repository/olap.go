@@ -258,6 +258,7 @@ type OLAPRepository interface {
 
 	ReadTaskRun(ctx context.Context, taskExternalId uuid.UUID) (*sqlcv1.V1TasksOlap, error)
 	ReadWorkflowRun(ctx context.Context, workflowRunExternalId uuid.UUID) (*V1WorkflowRunPopulator, error)
+	ReadWorkflowRunStatus(ctx context.Context, workflowRunExternalId uuid.UUID) (*V1WorkflowRunPopulator, error)
 	ReadTaskRunData(ctx context.Context, tenantId uuid.UUID, taskId int64, taskInsertedAt pgtype.Timestamptz, retryCount *int) (*TaskWithPayloads, uuid.UUID, error)
 
 	ListTasks(ctx context.Context, tenantId uuid.UUID, opts ListTaskRunOpts) ([]*TaskWithPayloads, int, error)
@@ -754,6 +755,25 @@ func (r *OLAPRepositoryImpl) ReadWorkflowRun(ctx context.Context, workflowRunExt
 			Output:               outputPayload,
 		},
 		TaskMetadata: taskMetadata,
+	}, nil
+}
+
+func (r *OLAPRepositoryImpl) ReadWorkflowRunStatus(ctx context.Context, workflowRunExternalId uuid.UUID) (*V1WorkflowRunPopulator, error) {
+	row, err := r.queries.ReadWorkflowRunStatusByExternalId(ctx, r.readPool, workflowRunExternalId)
+	if err != nil {
+		return nil, err
+	}
+
+	return &V1WorkflowRunPopulator{
+		WorkflowRun: &WorkflowRunData{
+			TenantID:          row.TenantID,
+			InsertedAt:        row.InsertedAt,
+			ExternalID:        row.ExternalID,
+			ReadableStatus:    row.ReadableStatus,
+			Kind:              row.Kind,
+			WorkflowID:        row.WorkflowID,
+			WorkflowVersionId: row.WorkflowVersionID,
+		},
 	}, nil
 }
 
@@ -3415,16 +3435,55 @@ func (r *OLAPRepositoryImpl) ReadPayload(ctx context.Context, tenantId uuid.UUID
 	return payload, nil
 }
 
+const payloadPartitionPruneWindow = 15 * time.Minute
+
 func (r *OLAPRepositoryImpl) readPayloads(ctx context.Context, tx sqlcv1.DBTX, tenantId uuid.UUID, opts ...ReadOLAPPayloadOpts) (map[uuid.UUID][]byte, error) {
+	if len(opts) == 0 {
+		return make(map[uuid.UUID][]byte), nil
+	}
+
 	externalIds := make([]uuid.UUID, len(opts))
+	var minInsertedAt, maxInsertedAt pgtype.Timestamptz
+	allTimestampsValid := true
 
 	for i, opt := range opts {
 		externalIds[i] = opt.ExternalId
+		if !opt.InsertedAt.Valid {
+			allTimestampsValid = false
+			continue
+		}
+		if !minInsertedAt.Valid || opt.InsertedAt.Time.Before(minInsertedAt.Time) {
+			minInsertedAt = opt.InsertedAt
+		}
+		if !maxInsertedAt.Valid || opt.InsertedAt.Time.After(maxInsertedAt.Time) {
+			maxInsertedAt = opt.InsertedAt
+		}
+	}
+
+	// v1_payloads_olap is range-partitioned by day on inserted_at, while
+	// CreateTaskEvents writes event payloads with a +/-300ms random jitter
+	// around Go time.Now() and callers pass v1_task_events_olap.inserted_at or
+	// event_timestamp. Pad the bounds so partition pruning still restricts the
+	// query to the target daily partition(s) without missing jittered rows.
+	if allTimestampsValid && minInsertedAt.Valid && maxInsertedAt.Valid {
+		minInsertedAt = pgtype.Timestamptz{
+			Time:  minInsertedAt.Time.Add(-payloadPartitionPruneWindow),
+			Valid: true,
+		}
+		maxInsertedAt = pgtype.Timestamptz{
+			Time:  maxInsertedAt.Time.Add(payloadPartitionPruneWindow),
+			Valid: true,
+		}
+	} else {
+		minInsertedAt = pgtype.Timestamptz{}
+		maxInsertedAt = pgtype.Timestamptz{}
 	}
 
 	payloads, err := r.queries.ReadPayloadsOLAP(ctx, tx, sqlcv1.ReadPayloadsOLAPParams{
-		Tenantid:    tenantId,
-		Externalids: externalIds,
+		Tenantid:      tenantId,
+		Externalids:   externalIds,
+		MinInsertedAt: minInsertedAt,
+		MaxInsertedAt: maxInsertedAt,
 	})
 
 	if err != nil {
