@@ -258,6 +258,7 @@ type OLAPRepository interface {
 
 	ReadTaskRun(ctx context.Context, taskExternalId uuid.UUID) (*sqlcv1.V1TasksOlap, error)
 	ReadWorkflowRun(ctx context.Context, workflowRunExternalId uuid.UUID) (*V1WorkflowRunPopulator, error)
+	ReadWorkflowRunStatus(ctx context.Context, workflowRunExternalId uuid.UUID) (*V1WorkflowRunPopulator, error)
 	ReadTaskRunData(ctx context.Context, tenantId uuid.UUID, taskId int64, taskInsertedAt pgtype.Timestamptz, retryCount *int) (*TaskWithPayloads, uuid.UUID, error)
 
 	ListTasks(ctx context.Context, tenantId uuid.UUID, opts ListTaskRunOpts) ([]*TaskWithPayloads, int, error)
@@ -754,6 +755,25 @@ func (r *OLAPRepositoryImpl) ReadWorkflowRun(ctx context.Context, workflowRunExt
 			Output:               outputPayload,
 		},
 		TaskMetadata: taskMetadata,
+	}, nil
+}
+
+func (r *OLAPRepositoryImpl) ReadWorkflowRunStatus(ctx context.Context, workflowRunExternalId uuid.UUID) (*V1WorkflowRunPopulator, error) {
+	row, err := r.queries.ReadWorkflowRunStatusByExternalId(ctx, r.readPool, workflowRunExternalId)
+	if err != nil {
+		return nil, err
+	}
+
+	return &V1WorkflowRunPopulator{
+		WorkflowRun: &WorkflowRunData{
+			TenantID:          row.TenantID,
+			InsertedAt:        row.InsertedAt,
+			ExternalID:        row.ExternalID,
+			ReadableStatus:    row.ReadableStatus,
+			Kind:              row.Kind,
+			WorkflowID:        row.WorkflowID,
+			WorkflowVersionId: row.WorkflowVersionID,
+		},
 	}, nil
 }
 
@@ -3416,15 +3436,30 @@ func (r *OLAPRepositoryImpl) ReadPayload(ctx context.Context, tenantId uuid.UUID
 }
 
 func (r *OLAPRepositoryImpl) readPayloads(ctx context.Context, tx sqlcv1.DBTX, tenantId uuid.UUID, opts ...ReadOLAPPayloadOpts) (map[uuid.UUID][]byte, error) {
+	if len(opts) == 0 {
+		return make(map[uuid.UUID][]byte), nil
+	}
+
 	externalIds := make([]uuid.UUID, len(opts))
+	var minInsertedAt, maxInsertedAt pgtype.Timestamptz
 
 	for i, opt := range opts {
 		externalIds[i] = opt.ExternalId
+		if opt.InsertedAt.Valid {
+			if !minInsertedAt.Valid || opt.InsertedAt.Time.Before(minInsertedAt.Time) {
+				minInsertedAt = opt.InsertedAt
+			}
+			if !maxInsertedAt.Valid || opt.InsertedAt.Time.After(maxInsertedAt.Time) {
+				maxInsertedAt = opt.InsertedAt
+			}
+		}
 	}
 
 	payloads, err := r.queries.ReadPayloadsOLAP(ctx, tx, sqlcv1.ReadPayloadsOLAPParams{
-		Tenantid:    tenantId,
-		Externalids: externalIds,
+		Tenantid:      tenantId,
+		Externalids:   externalIds,
+		MinInsertedAt: minInsertedAt,
+		MaxInsertedAt: maxInsertedAt,
 	})
 
 	if err != nil {

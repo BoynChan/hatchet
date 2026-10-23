@@ -658,6 +658,21 @@ func (t *APIServer) registerSpec(g *echo.Group, spec *openapi3.T) (*populator.Po
 		return workflowRun, workflowRun.WorkflowRun.TenantID.String(), nil
 	})
 
+	populatorMW.RegisterGetter("v1-workflow-run-status", func(config *server.ServerConfig, parentId, id string) (result interface{}, uniqueParentId string, err error) {
+		var workflowRunID uuid.UUID
+		if err := workflowRunID.Scan(id); err != nil {
+			return nil, "", echo.NewHTTPError(http.StatusBadRequest, "invalid workflow run id")
+		}
+
+		workflowRun, err := t.config.V1.OLAP().ReadWorkflowRunStatus(context.Background(), workflowRunID)
+
+		if err != nil {
+			return nil, "", err
+		}
+
+		return workflowRun, workflowRun.WorkflowRun.TenantID.String(), nil
+	})
+
 	populatorMW.RegisterGetter("v1-filter", func(config *server.ServerConfig, parentId, id string) (result interface{}, uniqueParentId string, err error) {
 		idUuid, err := uuid.Parse(id)
 

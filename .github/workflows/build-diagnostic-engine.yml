@@ -12,8 +12,13 @@ on:
         description: GHCR image tag
         required: true
         type: string
+      server_target:
+        description: Server target to build (engine or api)
+        required: false
+        default: engine
+        type: string
       engine_version:
-        description: Semantic version embedded in the engine binary
+        description: Semantic version embedded in the server binary
         required: true
         default: v0.110.23
         type: string
@@ -44,6 +49,7 @@ jobs:
         env:
           ENGINE_VERSION: ${{ inputs.engine_version }}
           IMAGE_TAG: ${{ inputs.image_tag }}
+          SERVER_TARGET: ${{ inputs.server_target || 'engine' }}
         run: |
           if [[ ! "$IMAGE_TAG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
             echo "Invalid image tag: $IMAGE_TAG" >&2
@@ -51,6 +57,10 @@ jobs:
           fi
           if [[ ! "$ENGINE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid engine version: $ENGINE_VERSION" >&2
+            exit 1
+          fi
+          if [[ "$SERVER_TARGET" != "engine" && "$SERVER_TARGET" != "api" ]]; then
+            echo "Invalid server target: $SERVER_TARGET" >&2
             exit 1
           fi
 
@@ -69,7 +79,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Test notification delivery
+      - name: Test notification delivery and API slimming
         env:
           SERVER_SECURITY_CHECK_ENABLED: "false"
           DATABASE_URL: postgresql://hatchet:hatchet@127.0.0.1:5431/hatchet
@@ -79,35 +89,39 @@ jobs:
           go test -race ./internal/msgqueue ./internal/msgqueue/postgres ./internal/services/dispatcher \
             -run 'Test(PubTenantMessage|PostgresPubSubRebindRetry|CreatedTaskStreamProjectionCompatibility|TenantStreamMsgIDsInSync)' -count=1
           go test -race -tags integration ./internal/msgqueue/postgres -run TestPostgres -count=1 -timeout 2m
+          go test -race ./api/v1/server/middleware/populator ./api/v1/server/handlers/v1/workflow-runs ./api/v1/server/handlers/v1/tasks ./api/v1/server/authz -count=1
 
-      - name: Build engine
+      - name: Build server image
         env:
           ENGINE_VERSION: ${{ inputs.engine_version }}
           IMAGE_TAG: ${{ inputs.image_tag }}
+          SERVER_TARGET: ${{ inputs.server_target || 'engine' }}
         run: |
           docker build \
             --file ./build/package/servers.dockerfile \
-            --build-arg SERVER_TARGET=engine \
+            --build-arg "SERVER_TARGET=$SERVER_TARGET" \
             --build-arg "VERSION=$ENGINE_VERSION" \
             --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
-            --tag "ghcr.io/boynchan/hatchet-engine:$IMAGE_TAG" \
+            --tag "ghcr.io/boynchan/hatchet-${SERVER_TARGET}:$IMAGE_TAG" \
             .
 
-      - name: Verify engine version
+      - name: Verify server version
         env:
           ENGINE_VERSION: ${{ inputs.engine_version }}
           IMAGE_TAG: ${{ inputs.image_tag }}
+          SERVER_TARGET: ${{ inputs.server_target || 'engine' }}
         run: |
           actual_version="$(docker run --rm \
             --env SERVER_SECURITY_CHECK_ENABLED=false \
-            "ghcr.io/boynchan/hatchet-engine:$IMAGE_TAG" \
-            /hatchet/hatchet-engine --version)"
+            "ghcr.io/boynchan/hatchet-${SERVER_TARGET}:$IMAGE_TAG" \
+            "/hatchet/hatchet-${SERVER_TARGET}" --version)"
           if [[ "$actual_version" != "$ENGINE_VERSION" ]]; then
-            echo "Engine version mismatch: expected $ENGINE_VERSION, got $actual_version" >&2
+            echo "Version mismatch: expected $ENGINE_VERSION, got $actual_version" >&2
             exit 1
           fi
 
-      - name: Push engine
+      - name: Push server image
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
-        run: docker push "ghcr.io/boynchan/hatchet-engine:$IMAGE_TAG"
+          SERVER_TARGET: ${{ inputs.server_target || 'engine' }}
+        run: docker push "ghcr.io/boynchan/hatchet-${SERVER_TARGET}:$IMAGE_TAG"
