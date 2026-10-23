@@ -3,11 +3,15 @@
 package dispatcher
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/rs/zerolog"
 
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
 	"github.com/hatchet-dev/hatchet/internal/services/dispatcher/contracts"
@@ -18,6 +22,47 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+type createdTaskStreamRecorder struct {
+	msgqueue.PubSub
+	message *msgqueue.Message
+}
+
+func (r *createdTaskStreamRecorder) Pub(_ context.Context, _ msgqueue.Topic, msg *msgqueue.Message) error {
+	r.message = msg
+	return nil
+}
+
+func TestCreatedTaskStreamProjectionCompatibility(t *testing.T) {
+	task := &v1.V1TaskWithPayload{
+		V1Task: &sqlcv1.V1Task{
+			WorkflowRunID: uuid.New(), ExternalID: uuid.New(), RetryCount: 3,
+			InsertedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+			Input:      []byte(strings.Repeat("input", 2000)),
+		},
+		Payload: []byte(strings.Repeat("payload", 2000)),
+	}
+	msg, err := tasktypes.CreatedTaskMessage(uuid.New(), tasktypes.CreatedTaskPayload{V1TaskWithPayload: task})
+	require.NoError(t, err)
+	fullEvents, err := workflowEventConverters[msgqueue.MsgIDCreatedTask](msg.Payloads)
+	require.NoError(t, err)
+	ps := &createdTaskStreamRecorder{}
+	l := zerolog.Nop()
+	require.NoError(t, msgqueue.PubTenantMessage(context.Background(), &l, nil, ps, nil, msg))
+	require.NotNil(t, ps.message)
+	compactEvents, err := workflowEventConverters[msgqueue.MsgIDCreatedTask](ps.message.Payloads)
+	require.NoError(t, err)
+	require.Equal(t, fullEvents, compactEvents, "the existing decoder must produce identical workflow events")
+	msg.PublishedAt, ps.message.PublishedAt = time.Now(), time.Now()
+	full, err := json.Marshal(msg)
+	require.NoError(t, err)
+	compact, err := json.Marshal(ps.message)
+	require.NoError(t, err)
+	wrapped, err := json.Marshal(v1.PubSubMessage{QueueName: msgqueue.TenantTopic(msg.TenantID).Name(), Payload: compact})
+	require.NoError(t, err)
+	require.Greater(t, len(full), 8000)
+	require.Less(t, len(wrapped), 8000)
+}
 
 func TestWorkflowRunEventTypeForOlapStatus(t *testing.T) {
 	t.Parallel()

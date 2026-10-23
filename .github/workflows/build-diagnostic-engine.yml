@@ -25,6 +25,20 @@ permissions:
 jobs:
   build-engine:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: hatchet
+          POSTGRES_PASSWORD: hatchet
+          POSTGRES_DB: hatchet
+        ports:
+          - 5431:5432
+        options: >-
+          --health-cmd "pg_isready -U hatchet"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Validate inputs
         env:
@@ -61,6 +75,17 @@ jobs:
         run: |
           go test -race ./internal/services/diagnostics
           go test ./pkg/config/loader -run TestDiagnostics -count=1
+
+      - name: Test notification delivery
+        env:
+          SERVER_SECURITY_CHECK_ENABLED: "false"
+          DATABASE_URL: postgresql://hatchet:hatchet@127.0.0.1:5431/hatchet
+        run: |
+          awk '/^CREATE TABLE "MessageQueue" \(/,/^\);/; /^CREATE TYPE "MessageQueueItemStatus" AS ENUM \(/,/^\);/; /^CREATE TABLE "MessageQueueItem" \(/,/^\);/' \
+            sql/schema/v0.sql | psql "$DATABASE_URL" -v ON_ERROR_STOP=1
+          go test -race ./internal/msgqueue ./internal/msgqueue/postgres ./internal/services/dispatcher \
+            -run 'Test(PubTenantMessage|PostgresPubSubRebindRetry|CreatedTaskStreamProjectionCompatibility|TenantStreamMsgIDsInSync)' -count=1
+          go test -race -tags integration ./internal/msgqueue/postgres -run TestPostgres -count=1 -timeout 2m
 
       - name: Build engine
         env:

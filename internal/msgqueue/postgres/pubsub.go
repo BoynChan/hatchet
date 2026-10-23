@@ -3,8 +3,10 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
@@ -16,12 +18,12 @@ import (
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
 )
 
-// fallbackPollBatchSize is the max number of >8KB fallback rows drained per poll.
+// fallbackPollBatchSize is the max number of >=8000-byte fallback rows drained per poll.
 const fallbackPollBatchSize = 100
 
 // PubSub implements msgqueue.PubSub in Postgres, using LISTEN/NOTIFY for
-// messages less than 8KB and the "MessageQueueItem" table for messages
-// greater than 8KB.
+// wrapped messages below 8000 bytes and the "MessageQueueItem" table for messages
+// at or above 8000 bytes.
 type PubSub struct {
 	repo v1.MessageQueueRepository
 	l    *zerolog.Logger
@@ -29,7 +31,7 @@ type PubSub struct {
 	// pool is the dedicated pool backing repo; used only for readiness checks
 	pool *pgxpool.Pool
 
-	// ttlCache dedupes queue-row upserts, which are needed so >8KB payloads can
+	// ttlCache dedupes queue-row upserts, which are needed so >=8000-byte payloads can
 	// fall back to durable rows
 	ttlCache *cache.TTLCache[string, bool]
 }
@@ -107,12 +109,12 @@ func (p *PubSub) IsReady() bool {
 }
 
 // Pub publishes a message to the topic via NOTIFY. Payloads whose wrapped
-// message exceeds pg_notify's 8KB limit fall back to a short-lived message
+// message reaches pg_notify's 8000-byte limit fall back to a short-lived message
 // queue row (see MessageQueueRepository.Notify), which subscribers drain with
 // a ~1s poll — task-stream-event payloads routinely exceed 8KB and stream
 // delivery must not regress.
 func (p *PubSub) Pub(ctx context.Context, topic msgqueue.Topic, msg *msgqueue.Message) error {
-	// upsert the queue row so >8KB fallback rows have a queue to land on
+	// upsert the queue row so >=8000-byte fallback rows have a queue to land on
 	err := p.ensureQueue(ctx, topic)
 
 	if err != nil {
@@ -130,8 +132,8 @@ func (p *PubSub) Pub(ctx context.Context, topic msgqueue.Topic, msg *msgqueue.Me
 		if err == nil {
 			eg.Go(func() error {
 				// Notify will automatically fall back to database storage if the
-				// wrapped message exceeds pg_notify's 8KB limit
-				return p.repo.Notify(ctx, topic.Name(), string(msgBytes))
+				// wrapped message reaches pg_notify's 8000-byte limit
+				return p.notify(ctx, topic, string(msgBytes))
 			})
 		} else {
 			p.l.Error().Ctx(ctx).Err(err).Msg("error marshalling message")
@@ -141,12 +143,28 @@ func (p *PubSub) Pub(ctx context.Context, topic msgqueue.Topic, msg *msgqueue.Me
 	return eg.Wait()
 }
 
+func (p *PubSub) notify(ctx context.Context, topic msgqueue.Topic, payload string) error {
+	err := p.repo.Notify(ctx, topic.Name(), payload)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" || pgErr.ConstraintName != "MessageQueueItem_queueId_fkey" {
+		return err
+	}
+
+	// Cleanup can remove a queue between its cached binding and the fallback
+	// insert. Only a rejected foreign-key insert is safe to retry without duplicates.
+	p.ttlCache.Remove(topic.Name())
+	if err := p.ensureQueue(ctx, topic); err != nil {
+		return err
+	}
+	return p.repo.Notify(ctx, topic.Name(), payload)
+}
+
 // Sub subscribes to a topic. Inline NOTIFY payloads are handled directly;
-// non-JSON notifications and a 1s ticker wake a poll that drains >8KB fallback
+// non-JSON notifications and a 1s ticker wake a poll that drains >=8000-byte fallback
 // rows. Delivery is at-most-once: handler errors are logged, never redelivered.
 //
 // Fanout divergence: inline NOTIFY payloads reach every subscriber of the
-// topic, but each >8KB fallback row is read and acked by exactly one
+// topic, but each >=8000-byte fallback row is read and acked by exactly one
 // subscriber, unlike the rabbitmq fanout, which delivers every message to
 // every subscriber.
 func (p *PubSub) Sub(topic msgqueue.Topic, handler msgqueue.MsgHandler) (func() error, error) {
@@ -204,7 +222,7 @@ func (p *PubSub) Sub(topic msgqueue.Topic, handler msgqueue.MsgHandler) (func() 
 		}
 	}
 
-	// poll for >8KB fallback rows
+	// poll for >=8000-byte fallback rows
 	op := queueutils.NewOperationPool(p.l, 60*time.Second, "postgres-pubsub", queueutils.OpMethod(func(ctx context.Context, _ string) (bool, error) {
 		messages, err := p.repo.ReadMessages(subscribeCtx, topic.Name(), fallbackPollBatchSize)
 

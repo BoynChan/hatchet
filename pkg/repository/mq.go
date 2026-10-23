@@ -81,13 +81,15 @@ func (m *messageQueueRepository) Notify(ctx context.Context, name string, payloa
 		return err
 	}
 
-	// PostgreSQL's pg_notify has an 8000 byte limit
-	// If the wrapped message exceeds this, fall back to database storage
-	if len(wrappedPayload) > 8000 {
+	// PostgreSQL requires the entire notification to be strictly below 8000 bytes.
+	if len(wrappedPayload) >= 8000 {
 		return m.AddMessage(ctx, name, []byte(payload))
 	}
 
-	return m.m.notify(ctx, wrappedPayload)
+	if err := m.m.notify(ctx, wrappedPayload); err != nil {
+		return fmt.Errorf("notify queue %q (payload_bytes=%d, wrapped_bytes=%d): %w", name, len(payload), len(wrappedPayload), err)
+	}
+	return nil
 }
 
 func (m *messageQueueRepository) AddMessage(ctx context.Context, queue string, payload []byte) error {
