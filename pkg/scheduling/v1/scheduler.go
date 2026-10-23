@@ -853,7 +853,9 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 				}
 			}
 
-			if totalSlots == 0 {
+			// A registered action keeps its starvation episodes while every
+			// worker is busy, so repeated misses cannot request fresh reads.
+			if len(actionWorkerIds) == 0 {
 				delete(s.actions, actionId)
 				actionsRemoved++
 				continue
