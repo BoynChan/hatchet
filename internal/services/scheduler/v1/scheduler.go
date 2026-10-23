@@ -383,13 +383,16 @@ func (s *Scheduler) handleCheckQueue(ctx context.Context, msg *msgqueue.Message)
 
 	payloads := msgqueue.JSONConvert[tasktypes.CheckTenantQueuesPayload](msg.Payloads)
 
+	// All releases in this message have already committed. One fresh capacity
+	// read covers the entire batch before any queue or concurrency wakeup.
 	for _, payload := range payloads {
-		// Queue notifications may start assignment immediately. Refresh capacity
-		// first so a release does not wake a queue against an exhausted pool.
 		if payload.SlotsReleased {
 			s.pool.Replenish(ctx, msg.TenantID)
+			break
 		}
+	}
 
+	for _, payload := range payloads {
 		if len(payload.StrategyIds) > 0 {
 			s.pool.NotifyConcurrency(ctx, msg.TenantID, payload.StrategyIds)
 		}
