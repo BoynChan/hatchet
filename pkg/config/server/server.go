@@ -67,7 +67,8 @@ type ServerConfigFile struct {
 
 	OpenTelemetry shared.OpenTelemetryConfigFile `mapstructure:"otel" json:"otel,omitempty"`
 
-	Prometheus shared.PrometheusConfigFile `mapstructure:"prometheus" json:"prometheus,omitempty"`
+	Prometheus  shared.PrometheusConfigFile  `mapstructure:"prometheus" json:"prometheus,omitempty"`
+	Diagnostics shared.DiagnosticsConfigFile `mapstructure:"diagnostics" json:"diagnostics,omitempty"`
 
 	Observability shared.ObservabilityConfigFile `mapstructure:"observability" json:"observability,omitempty"`
 
@@ -791,7 +792,8 @@ type ServerConfig struct {
 
 	OpenTelemetry shared.OpenTelemetryConfigFile
 
-	Prometheus shared.PrometheusConfigFile
+	Prometheus  shared.PrometheusConfigFile
+	Diagnostics shared.DiagnosticsConfigFile
 
 	PrometheusGate *prometheus.Gate
 
@@ -1065,6 +1067,15 @@ func BindAllEnv(v *viper.Viper) {
 	_ = v.BindEnv("prometheus.address", "SERVER_PROMETHEUS_ADDRESS")
 	_ = v.BindEnv("prometheus.path", "SERVER_PROMETHEUS_PATH")
 	_ = v.BindEnv("prometheus.tenantScoped", "SERVER_PROMETHEUS_SERVER_TENANT_SCOPED")
+
+	_ = v.BindEnv("diagnostics.enabled", "SERVER_DIAGNOSTICS_ENABLED")
+	_ = v.BindEnv("diagnostics.address", "SERVER_DIAGNOSTICS_ADDRESS")
+	_ = v.BindEnv("diagnostics.snapshotDir", "SERVER_DIAGNOSTICS_SNAPSHOT_DIR")
+	_ = v.BindEnv("diagnostics.interval", "SERVER_DIAGNOSTICS_INTERVAL")
+	_ = v.BindEnv("diagnostics.cooldown", "SERVER_DIAGNOSTICS_COOLDOWN")
+	_ = v.BindEnv("diagnostics.goroutineThreshold", "SERVER_DIAGNOSTICS_GOROUTINE_THRESHOLD")
+	_ = v.BindEnv("diagnostics.memoryThreshold", "SERVER_DIAGNOSTICS_MEMORY_THRESHOLD")
+	_ = v.BindEnv("diagnostics.maxSnapshots", "SERVER_DIAGNOSTICS_MAX_SNAPSHOTS")
 
 	// tenant alerting options
 	_ = v.BindEnv("tenantAlerting.slack.enabled", "SERVER_TENANT_ALERTING_SLACK_ENABLED")

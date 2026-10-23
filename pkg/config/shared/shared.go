@@ -1,6 +1,9 @@
 package shared
 
-import "io"
+import (
+	"io"
+	"time"
+)
 
 type TLSConfigFile struct {
 	// TLSStrategy can be "tls", "mtls", or "none"
@@ -80,4 +83,16 @@ type ObservabilityConfigFile struct {
 	// MaxBatchSize is the maximum number of spans accepted per Export RPC call. Excess spans are rejected
 	// via OTLP PartialSuccess, signaling SDK exporters to back off.
 	MaxBatchSize int `mapstructure:"maxBatchSize" json:"maxBatchSize,omitempty" default:"1000"`
+}
+
+// DiagnosticsConfigFile controls opt-in, process-local memory diagnostics.
+type DiagnosticsConfigFile struct {
+	Enabled            bool          `mapstructure:"enabled" json:"enabled,omitempty" default:"false"`
+	Address            string        `mapstructure:"address" json:"address,omitempty" default:"127.0.0.1:6060"`
+	SnapshotDir        string        `mapstructure:"snapshotDir" json:"snapshotDir,omitempty"`
+	Interval           time.Duration `mapstructure:"interval" json:"interval,omitempty" default:"15s"`
+	Cooldown           time.Duration `mapstructure:"cooldown" json:"cooldown,omitempty" default:"5m"`
+	GoroutineThreshold int           `mapstructure:"goroutineThreshold" json:"goroutineThreshold,omitempty" default:"5000"`
+	MemoryThreshold    uint64        `mapstructure:"memoryThreshold" json:"memoryThreshold,omitempty" default:"1073741824"`
+	MaxSnapshots       int           `mapstructure:"maxSnapshots" json:"maxSnapshots,omitempty" default:"4"`
 }
