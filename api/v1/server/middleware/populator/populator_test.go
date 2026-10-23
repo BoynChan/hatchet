@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/hatchet-dev/hatchet/api/v1/server/middleware"
+	"github.com/hatchet-dev/hatchet/api/v1/server/oas/gen"
 	"github.com/hatchet-dev/hatchet/pkg/config/server"
 )
 
@@ -121,13 +122,20 @@ func TestPopulatorMiddlewareParentDisagreement(t *testing.T) {
 }
 
 func TestPopulatorMiddlewareWorkflowRunGetStatusUsesLightweightGetter(t *testing.T) {
+	spec, err := gen.GetSwagger()
+	assert.NoError(t, err)
+
+	statusPathItem := spec.Paths.Find("/api/v1/stable/workflow-runs/{v1-workflow-run}/status")
+	assert.NotNil(t, statusPathItem)
+	assert.NotNil(t, statusPathItem.Get)
+
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stable/workflow-runs/00000000-0000-0000-0000-000000000001/status", nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
 	routeInfo := &middleware.RouteInfo{
-		OperationID: "v1-workflow-run:get-status",
+		OperationID: statusPathItem.Get.OperationID,
 		Resources:   []string{"tenant", "v1-workflow-run"},
 	}
 
@@ -152,7 +160,7 @@ func TestPopulatorMiddlewareWorkflowRunGetStatusUsesLightweightGetter(t *testing
 		return &oneToManyResource{ID: id, ParentID: tenantId}, tenantId, nil
 	})
 
-	err := populator.Middleware(routeInfo)(c)
+	err = populator.Middleware(routeInfo)(c)
 	assert.NoError(t, err)
 	assert.False(t, heavyGetterCalled, "v1-workflow-run getter should not be called for get-status")
 	assert.True(t, lightweightGetterCalled, "v1-workflow-run-status getter should be called for get-status")

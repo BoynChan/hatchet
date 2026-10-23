@@ -63,7 +63,7 @@ func (p *Populator) populate(c echo.Context, r *middleware.RouteInfo) error {
 	}
 
 	resources := r.Resources
-	if r.OperationID == "v1-workflow-run:get-status" {
+	if r.OperationID == "V1WorkflowRunGetStatus" || r.OperationID == "v1-workflow-run:get-status" {
 		if id, ok := keysToIds["v1-workflow-run"]; ok && id != "" {
 			keysToIds["v1-workflow-run-status"] = id
 		}
