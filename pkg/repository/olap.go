@@ -3435,6 +3435,8 @@ func (r *OLAPRepositoryImpl) ReadPayload(ctx context.Context, tenantId uuid.UUID
 	return payload, nil
 }
 
+const payloadPartitionPruneWindow = 15 * time.Minute
+
 func (r *OLAPRepositoryImpl) readPayloads(ctx context.Context, tx sqlcv1.DBTX, tenantId uuid.UUID, opts ...ReadOLAPPayloadOpts) (map[uuid.UUID][]byte, error) {
 	if len(opts) == 0 {
 		return make(map[uuid.UUID][]byte), nil
@@ -3442,17 +3444,39 @@ func (r *OLAPRepositoryImpl) readPayloads(ctx context.Context, tx sqlcv1.DBTX, t
 
 	externalIds := make([]uuid.UUID, len(opts))
 	var minInsertedAt, maxInsertedAt pgtype.Timestamptz
+	allTimestampsValid := true
 
 	for i, opt := range opts {
 		externalIds[i] = opt.ExternalId
-		if opt.InsertedAt.Valid {
-			if !minInsertedAt.Valid || opt.InsertedAt.Time.Before(minInsertedAt.Time) {
-				minInsertedAt = opt.InsertedAt
-			}
-			if !maxInsertedAt.Valid || opt.InsertedAt.Time.After(maxInsertedAt.Time) {
-				maxInsertedAt = opt.InsertedAt
-			}
+		if !opt.InsertedAt.Valid {
+			allTimestampsValid = false
+			continue
 		}
+		if !minInsertedAt.Valid || opt.InsertedAt.Time.Before(minInsertedAt.Time) {
+			minInsertedAt = opt.InsertedAt
+		}
+		if !maxInsertedAt.Valid || opt.InsertedAt.Time.After(maxInsertedAt.Time) {
+			maxInsertedAt = opt.InsertedAt
+		}
+	}
+
+	// v1_payloads_olap is range-partitioned by day on inserted_at, while
+	// CreateTaskEvents writes event payloads with a +/-300ms random jitter
+	// around Go time.Now() and callers pass v1_task_events_olap.inserted_at or
+	// event_timestamp. Pad the bounds so partition pruning still restricts the
+	// query to the target daily partition(s) without missing jittered rows.
+	if allTimestampsValid && minInsertedAt.Valid && maxInsertedAt.Valid {
+		minInsertedAt = pgtype.Timestamptz{
+			Time:  minInsertedAt.Time.Add(-payloadPartitionPruneWindow),
+			Valid: true,
+		}
+		maxInsertedAt = pgtype.Timestamptz{
+			Time:  maxInsertedAt.Time.Add(payloadPartitionPruneWindow),
+			Valid: true,
+		}
+	} else {
+		minInsertedAt = pgtype.Timestamptz{}
+		maxInsertedAt = pgtype.Timestamptz{}
 	}
 
 	payloads, err := r.queries.ReadPayloadsOLAP(ctx, tx, sqlcv1.ReadPayloadsOLAPParams{

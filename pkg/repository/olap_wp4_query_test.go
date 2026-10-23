@@ -44,9 +44,15 @@ func TestOLAPReadPayloadsAndWorkflowRunStatus(t *testing.T) {
 	_, err = repo.ReadWorkflowRunStatus(ctx, uuid.New())
 	require.ErrorIs(t, err, pgx.ErrNoRows)
 
-	// 3. Complete the task with an output payload and verify both ReadWorkflowRunStatus
-	// and ReadPayload (with partition-pruning minInsertedAt/maxInsertedAt).
+	// 3. Complete the task with a non-empty output payload and verify ReadWorkflowRunStatus,
+	// ReadWorkflowRun, and ListTasksByIdAndInsertedAt recover the jittered payload from v1_payloads_olap.
 	batches := replayEventBatches(f)
+	expectedOutput := `{"result":["https://image-cdn.example/out.webp"]}`
+	for i := range batches[0] {
+		if batches[0][i].EventType == sqlcv1.V1EventTypeOlapFINISHED {
+			batches[0][i].Output = []byte(expectedOutput)
+		}
+	}
 	eventExternalIdToWorkflowRunId := map[uuid.UUID]uuid.UUID{f.externalId: f.externalId}
 	_, locksNotAcquired, err := repo.CreateTaskEvents(ctx, f.tenantId, batches[0], eventExternalIdToWorkflowRunId, nil, nil)
 	require.NoError(t, err)
@@ -56,7 +62,18 @@ func TestOLAPReadPayloadsAndWorkflowRunStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, sqlcv1.V1ReadableStatusOlapCOMPLETED, statusPopulator.WorkflowRun.ReadableStatus)
 
-	// 4. Verify ReadPayload with exact InsertedAt and batch readPayloads across timestamps.
+	fullPopulator, err := repo.ReadWorkflowRun(ctx, f.externalId)
+	require.NoError(t, err)
+	require.NotNil(t, fullPopulator)
+	require.NotNil(t, fullPopulator.WorkflowRun)
+	assert.JSONEq(t, expectedOutput, string(fullPopulator.WorkflowRun.Output))
+
+	tasksWithPayloads, err := repo.ListTasksByIdAndInsertedAt(ctx, f.tenantId, fullPopulator.TaskMetadata, true)
+	require.NoError(t, err)
+	require.Len(t, tasksWithPayloads, 1)
+	assert.JSONEq(t, expectedOutput, string(tasksWithPayloads[0].OutputPayload))
+
+	// 4. Verify ReadPayload with jittered InsertedAt and batch readPayloads across timestamps.
 	payloadID1 := uuid.New()
 	payloadID2 := uuid.New()
 	ts1 := pgtype.Timestamptz{Time: f.insertedAt.Time, Valid: true}
@@ -76,9 +93,10 @@ func TestOLAPReadPayloadsAndWorkflowRunStatus(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	// Reading with +/-500ms jitter or a few seconds skew must still find the payload.
 	p1, err := repo.ReadPayload(ctx, f.tenantId, ReadOLAPPayloadOpts{
 		ExternalId: payloadID1,
-		InsertedAt: ts1,
+		InsertedAt: pgtype.Timestamptz{Time: ts1.Time.Add(500 * time.Millisecond), Valid: true},
 	})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"step":"input"}`, string(p1))
@@ -91,8 +109,8 @@ func TestOLAPReadPayloadsAndWorkflowRunStatus(t *testing.T) {
 	assert.JSONEq(t, `{"step":"input"}`, string(batchPayloads[payloadID1]))
 	assert.JSONEq(t, `{"step":"output"}`, string(batchPayloads[payloadID2]))
 
-	// Reading with an out-of-range InsertedAt should prune out the partition/row.
-	tsOther := pgtype.Timestamptz{Time: f.insertedAt.Time.Add(10 * time.Minute), Valid: true}
+	// Reading with an InsertedAt outside the partition-pruning window should prune out the row.
+	tsOther := pgtype.Timestamptz{Time: f.insertedAt.Time.Add(2 * payloadPartitionPruneWindow), Valid: true}
 	pMissing, err := repo.ReadPayload(ctx, f.tenantId, ReadOLAPPayloadOpts{
 		ExternalId: payloadID1,
 		InsertedAt: tsOther,

@@ -89,6 +89,7 @@ jobs:
           go test -race ./internal/msgqueue ./internal/msgqueue/postgres ./internal/services/dispatcher \
             -run 'Test(PubTenantMessage|PostgresPubSubRebindRetry|CreatedTaskStreamProjectionCompatibility|TenantStreamMsgIDsInSync)' -count=1
           go test -race -tags integration ./internal/msgqueue/postgres -run TestPostgres -count=1 -timeout 2m
+          go test -race ./pkg/repository -run TestOLAPReadPayloadsAndWorkflowRunStatus -count=1 -timeout 2m
           go test -race ./api/v1/server/middleware/populator ./api/v1/server/handlers/v1/workflow-runs ./api/v1/server/handlers/v1/tasks ./api/v1/server/authz -count=1
 
       - name: Build server image
