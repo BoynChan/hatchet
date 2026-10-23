@@ -81,6 +81,12 @@ func (m *MQPubBuffer) Pub(ctx context.Context, queue Queue, msg *Message, wait b
 	var msgBuf *msgIdPubBuffer
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := m.ctx.Err(); err != nil {
+			return err
+		}
 		var ok bool
 		msgBuf, ok = m.buffers.Load(k)
 
@@ -109,8 +115,27 @@ func (m *MQPubBuffer) Pub(ctx context.Context, queue Queue, msg *Message, wait b
 
 	msgWithErr := &msgWithErrCh{msg: msg}
 	if wait {
-		msgWithErr.errCh = make(chan error)
+		// A cancelled caller must not block the flusher when it reports the result.
+		msgWithErr.errCh = make(chan error, 1)
 	}
+	if err := msgBuf.enqueue(ctx, m.ctx, msgWithErr); err != nil {
+		return err
+	}
+	if wait {
+		select {
+		case err := <-msgWithErr.errCh:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-m.ctx.Done():
+			return m.ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (msgBuf *msgIdPubBuffer) enqueue(ctx, shutdown context.Context, msg *msgWithErrCh) error {
+	defer msgBuf.release()
 
 	// Signal early flush if the channel is already at capacity — the send below may block.
 	if len(msgBuf.msgIdPubBufferCh) >= msgBuf.bufferSize {
@@ -121,14 +146,19 @@ func (m *MQPubBuffer) Pub(ctx context.Context, queue Queue, msg *Message, wait b
 	}
 
 	// this places some backpressure on the consumer if buffers are full
-	msgBuf.msgIdPubBufferCh <- msgWithErr
-	msgBuf.notifier <- struct{}{}
-	msgBuf.release()
-
-	if wait {
-		return <-msgWithErr.errCh
+	select {
+	case msgBuf.msgIdPubBufferCh <- msg:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-shutdown.Done():
+		return shutdown.Err()
 	}
-
+	// Notifications coalesce. Once accepted, the message must wake a parked
+	// flusher even if its caller has already cancelled.
+	select {
+	case msgBuf.notifier <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -156,6 +186,7 @@ func newMsgIDPubBuffer(ctx context.Context, tenantID uuid.UUID, msgID string, pu
 		pub:              pub,
 	}
 	b.stop = stop
+	b.notifier = make(chan struct{}, 1)
 	b.startFlusher(ctx, func() int { return len(b.msgIdPubBufferCh) }, b.flush)
 	b.startSemaphoreReleaser(ctx, func() int { return len(b.msgIdPubBufferCh) }, b.flush)
 	return b

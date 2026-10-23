@@ -92,6 +92,11 @@ jobs:
           go test -race ./pkg/repository -run TestOLAPReadPayloadsAndWorkflowRunStatus -count=1 -timeout 2m
           go test -race ./api/v1/server/middleware/populator ./api/v1/server/handlers/v1/workflow-runs ./api/v1/server/handlers/v1/tasks ./api/v1/server/authz -count=1
 
+      - name: Test scheduler event backpressure
+        env:
+          SERVER_SECURITY_CHECK_ENABLED: "false"
+        run: go test -race ./internal/services/scheduler/v1 ./internal/msgqueue -count=1 -timeout 2m
+
       - name: Build server image
         env:
           ENGINE_VERSION: ${{ inputs.engine_version }}

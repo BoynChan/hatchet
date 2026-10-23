@@ -145,8 +145,10 @@ type Scheduler struct {
 
 	signaler *signal.OLAPSignaler
 
-	tasksWithNoWorkerCache *expirable.LRU[string, struct{}]
-	rateLimitedTasksCache  *expirable.LRU[string, struct{}]
+	tasksWithNoWorkerCache  *expirable.LRU[string, struct{}]
+	rateLimitedTasksCache   *expirable.LRU[string, struct{}]
+	monitoringEventMu       sync.Mutex
+	pendingMonitoringEvents map[monitoringEventKey]struct{}
 
 	promGate *prometheus.Gate
 
@@ -285,28 +287,11 @@ func (s *Scheduler) Start() (func() error, error) {
 
 	queueResults := s.pool.GetResultsCh()
 
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case res := <-queueResults:
-				s.l.Debug().Ctx(ctx).Msgf("partition: received queue results")
-
-				if res == nil {
-					continue
-				}
-
-				go func(results *v1.QueueResults) {
-					err := s.scheduleStepRuns(ctx, results.TenantId, results)
-
-					if err != nil {
-						s.l.Error().Ctx(ctx).Err(err).Msg("could not schedule step runs")
-					}
-				}(res)
-			}
+	waitQueueResults := consumeQueueResults(ctx, queueResults, func(res *v1.QueueResults) {
+		if err := s.scheduleStepRuns(ctx, res.TenantId, res); err != nil {
+			s.l.Error().Ctx(ctx).Err(err).Msg("could not schedule step runs")
 		}
-	}()
+	})
 
 	concurrencyResults := s.pool.GetConcurrencyResultsCh()
 
@@ -329,6 +314,7 @@ func (s *Scheduler) Start() (func() error, error) {
 
 	cleanup := func() error {
 		cancel()
+		defer waitQueueResults()
 
 		if err := cleanupQueue(); err != nil {
 			return fmt.Errorf("could not cleanup job processing queue: %w", err)
@@ -630,7 +616,7 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 		for _, rateLimited := range res.RateLimited {
 			cacheKey := fmt.Sprintf("%d:%d", rateLimited.TaskId, rateLimited.RetryCount)
 
-			if _, ok := s.rateLimitedTasksCache.Get(cacheKey); ok {
+			if !s.reserveMonitoringEvent(s.rateLimitedTasksCache, cacheKey) {
 				continue
 			}
 
@@ -653,6 +639,7 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 			)
 
 			if err != nil {
+				s.finishMonitoringEvent(s.rateLimitedTasksCache, cacheKey, false)
 				outerErr = multierror.Append(outerErr, fmt.Errorf("could not create cancelled task: %w", err))
 				continue
 			}
@@ -668,7 +655,7 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 				outerErr = multierror.Append(outerErr, fmt.Errorf("could not send cancelled task: %w", err))
 			}
 
-			s.rateLimitedTasksCache.Add(cacheKey, struct{}{})
+			s.finishMonitoringEvent(s.rateLimitedTasksCache, cacheKey, err == nil)
 		}
 	}
 
@@ -704,7 +691,7 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 			taskExternalId := unassigned.ExternalID.String()
 
 			// if we have seen this task recently, don't send it again
-			if _, ok := s.tasksWithNoWorkerCache.Get(taskExternalId); ok {
+			if !s.reserveMonitoringEvent(s.tasksWithNoWorkerCache, taskExternalId) {
 				s.l.Debug().Ctx(ctx).Msgf("skipping unassigned task %s as it was recently unassigned", taskExternalId)
 				continue
 			}
@@ -722,6 +709,7 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 			)
 
 			if err != nil {
+				s.finishMonitoringEvent(s.tasksWithNoWorkerCache, taskExternalId, false)
 				outerErr = multierror.Append(outerErr, fmt.Errorf("could not create cancelled task: %w", err))
 				continue
 			}
@@ -737,7 +725,7 @@ func (s *Scheduler) scheduleStepRuns(ctx context.Context, tenantId uuid.UUID, re
 				outerErr = multierror.Append(outerErr, fmt.Errorf("could not send cancelled task: %w", err))
 			}
 
-			s.tasksWithNoWorkerCache.Add(taskExternalId, struct{}{})
+			s.finishMonitoringEvent(s.tasksWithNoWorkerCache, taskExternalId, err == nil)
 		}
 	}
 

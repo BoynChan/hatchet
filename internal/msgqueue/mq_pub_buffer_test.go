@@ -2,6 +2,8 @@ package msgqueue
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +12,113 @@ import (
 // mockMessageQueue satisfies MessageQueue for tests. Only SendMessage is wired up.
 type mockMessageQueue struct {
 	sendMessageFn func(ctx context.Context, q Queue, msg *Message) error
+}
+
+func TestPubBufferFullEnqueueCanBeCancelled(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		name := "caller_cancelled"
+		if shutdown {
+			name = "buffer_stopped"
+		}
+		t.Run(name, func(t *testing.T) {
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			mq := &mockMessageQueue{sendMessageFn: func(context.Context, Queue, *Message) error {
+				once.Do(func() { close(started) })
+				<-release
+				return nil
+			}}
+			buf := NewMQPubBuffer(mq)
+			defer buf.Stop()
+			defer close(release)
+			msg := &Message{TenantID: testTenantID, ID: "cancel-enqueue", Payloads: [][]byte{[]byte("p")}}
+			if err := buf.Pub(context.Background(), TASK_PROCESSING_QUEUE, msg, false); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("flush did not start")
+			}
+			for i := 0; i < PUB_BUFFER_SIZE; i++ {
+				if err := buf.Pub(context.Background(), TASK_PROCESSING_QUEUE, msg, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- buf.Pub(ctx, TASK_PROCESSING_QUEUE, msg, false) }()
+			select {
+			case err := <-done:
+				t.Fatalf("full enqueue returned before cancellation: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			if shutdown {
+				buf.Stop()
+			} else {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected cancellation, got %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("full enqueue ignored cancellation")
+			}
+			inner, ok := buf.buffers.Load(getPubKey(TASK_PROCESSING_QUEUE, testTenantID, msg.ID))
+			if !ok || !inner.evictMu.TryLock() {
+				t.Fatal("cancelled enqueue retained eviction lock")
+			}
+			inner.evictMu.Unlock()
+		})
+	}
+}
+
+func TestPubBufferCancelledWaitDoesNotBlockLaterFlush(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var calls atomic.Int64
+	mq := &mockMessageQueue{sendMessageFn: func(context.Context, Queue, *Message) error {
+		once.Do(func() { close(started); <-release })
+		calls.Add(1)
+		return nil
+	}}
+	buf := NewMQPubBuffer(mq)
+	defer buf.Stop()
+	var unblock sync.Once
+	defer unblock.Do(func() { close(release) })
+	msg := &Message{TenantID: testTenantID, ID: "cancel-wait", Payloads: [][]byte{[]byte("p")}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- buf.Pub(ctx, TASK_PROCESSING_QUEUE, msg, true) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("flush did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected cancellation, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("result wait ignored cancellation")
+	}
+	unblock.Do(func() { close(release) })
+	markerCtx, markerCancel := context.WithTimeout(context.Background(), time.Second)
+	defer markerCancel()
+	if err := buf.Pub(markerCtx, TASK_PROCESSING_QUEUE, msg, true); err != nil {
+		t.Fatalf("later flush stalled: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected two flushes, got %d", calls.Load())
+	}
 }
 
 func (m *mockMessageQueue) Clone() (func() error, MessageQueue, error) {
