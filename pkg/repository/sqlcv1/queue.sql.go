@@ -584,31 +584,47 @@ func (q *Queries) GetMinUnprocessedQueueItemId(ctx context.Context, db DBTX, arg
 const getQueueSizes = `-- name: GetQueueSizes :many
 WITH sizes AS (
     SELECT
-        queue,
-        workflow_id,
-        COUNT(*) AS count
+        qi.queue,
+        w."name" AS workflow_name,
+        COUNT(*) AS count,
+        MIN(qi.task_inserted_at) AS oldest_inserted_at
     FROM
-        v1_queue_item
+        v1_queue_item qi
+    JOIN "Workflow" w ON w."id" = qi.workflow_id
     WHERE
-        tenant_id = $1::uuid
+        qi.tenant_id = $1::uuid
     GROUP BY
-        queue, workflow_id
+        qi.queue, w."name"
+), known_queues AS (
+    SELECT
+        q.name AS queue,
+        COALESCE(w."name", split_part(q.name, ':', 1)) AS workflow_name
+    FROM
+        v1_queue q
+    LEFT JOIN "Workflow" w
+        ON w."tenantId" = q.tenant_id
+        AND w."name" = split_part(q.name, ':', 1)
+        AND w."deletedAt" IS NULL
+    WHERE
+        q.tenant_id = $1::uuid
+    UNION
+    SELECT queue, workflow_name FROM sizes
 )
 SELECT
-    s.queue,
-    w."name" AS workflow_name,
-    SUM(s.count)::bigint AS count
+    kq.queue,
+    kq.workflow_name,
+    COALESCE(s.count, 0)::bigint AS count,
+    COALESCE(EXTRACT(EPOCH FROM GREATEST(NOW() - s.oldest_inserted_at, INTERVAL '0 seconds')), 0)::double precision AS oldest_age_seconds
 FROM
-    sizes s
-JOIN "Workflow" w ON w."id" = s.workflow_id
-GROUP BY
-    s.queue, w."name"
+    known_queues kq
+LEFT JOIN sizes s ON s.queue = kq.queue AND s.workflow_name = kq.workflow_name
 `
 
 type GetQueueSizesRow struct {
-	Queue        string `json:"queue"`
-	WorkflowName string `json:"workflow_name"`
-	Count        int64  `json:"count"`
+	Queue            string  `json:"queue"`
+	WorkflowName     string  `json:"workflow_name"`
+	Count            int64   `json:"count"`
+	OldestAgeSeconds float64 `json:"oldest_age_seconds"`
 }
 
 func (q *Queries) GetQueueSizes(ctx context.Context, db DBTX, tenantid uuid.UUID) ([]*GetQueueSizesRow, error) {
@@ -620,7 +636,7 @@ func (q *Queries) GetQueueSizes(ctx context.Context, db DBTX, tenantid uuid.UUID
 	var items []*GetQueueSizesRow
 	for rows.Next() {
 		var i GetQueueSizesRow
-		if err := rows.Scan(&i.Queue, &i.WorkflowName, &i.Count); err != nil {
+		if err := rows.Scan(&i.Queue, &i.WorkflowName, &i.Count, &i.OldestAgeSeconds); err != nil {
 			return nil, err
 		}
 		items = append(items, &i)

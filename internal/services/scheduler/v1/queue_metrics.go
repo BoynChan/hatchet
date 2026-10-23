@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	queueMetricsPollInterval = 15 * time.Second
+	queueMetricsPollInterval = 1 * time.Second
 
 	// queueMetricsPollTimeout bounds one full polling pass. The per-tenant aggregate
 	// queries scan the tenant's queue items, so a pass over all tenants on the partition
@@ -134,16 +134,19 @@ func (p *queueMetricsPoller) applyQueueSizes(tenantId uuid.UUID, rows []*sqlcv1.
 		k := queueSizeKey{queue: row.Queue, workflowName: row.WorkflowName}
 		current[k] = struct{}{}
 		prometheus.TenantQueueSize.WithLabelValues(tenantIdStr, k.queue, k.workflowName).Set(float64(row.Count))
+		prometheus.TenantQueueOldestItemAge.WithLabelValues(tenantIdStr, k.queue, k.workflowName).Set(row.OldestAgeSeconds)
 	}
 
 	zeroed, deleted, next := diffStaleSeries(p.knownQueueSizes[tenantId], current)
 
 	for _, k := range zeroed {
 		prometheus.TenantQueueSize.WithLabelValues(tenantIdStr, k.queue, k.workflowName).Set(0)
+		prometheus.TenantQueueOldestItemAge.WithLabelValues(tenantIdStr, k.queue, k.workflowName).Set(0)
 	}
 
 	for _, k := range deleted {
 		prometheus.TenantQueueSize.DeleteLabelValues(tenantIdStr, k.queue, k.workflowName)
+		prometheus.TenantQueueOldestItemAge.DeleteLabelValues(tenantIdStr, k.queue, k.workflowName)
 	}
 
 	if len(next) == 0 {

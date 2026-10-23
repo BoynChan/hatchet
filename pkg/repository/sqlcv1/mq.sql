@@ -15,6 +15,7 @@ VALUES (
     CASE WHEN sqlc.narg('exclusiveConsumerId')::uuid IS NOT NULL THEN sqlc.narg('exclusiveConsumerId')::uuid ELSE NULL END
 ) ON CONFLICT ("name") DO UPDATE
 SET
+    "lastActive" = NOW(),
     "durable" = @durable::boolean,
     "autoDeleted" = @autoDeleted::boolean,
     "exclusive" = @exclusive::boolean,

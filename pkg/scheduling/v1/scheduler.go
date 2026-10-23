@@ -53,6 +53,7 @@ type Scheduler struct {
 	pools         map[poolKey]*slotPool
 	poolsByWorker map[uuid.UUID]map[string]*slotPool
 	workers       map[uuid.UUID]*worker
+	queues        map[string]struct{}
 
 	// unackedSlots are slots which have been assigned to a worker, but have not been flushed
 	// to the database yet. They negatively count towards a worker's available slot count.
@@ -117,6 +118,7 @@ func newScheduler(cf *sharedConfig, tenantId uuid.UUID, rl *rateLimiter, exts *E
 		pools:              make(map[poolKey]*slotPool),
 		poolsByWorker:      make(map[uuid.UUID]map[string]*slotPool),
 		workers:            make(map[uuid.UUID]*worker),
+		queues:             make(map[string]struct{}),
 		unackedSlots:       make(map[int]*assignedSlots),
 		warmedSlotTypes:    make(map[uuid.UUID]map[string]struct{}),
 		notifyReplenishCh:  make(chan struct{}, 1),
@@ -362,8 +364,13 @@ func (s *Scheduler) setWorkers(workers []*v1.ListActiveWorkersResult) {
 		newWorkers := make(map[uuid.UUID]*worker, len(workers))
 
 		for i := range workers {
+			var actions []string
+			if prev, ok := s.workers[workers[i].ID]; ok {
+				actions = prev.actions
+			}
 			newWorkers[workers[i].ID] = &worker{
 				ListActiveWorkersResult: workers[i],
+				actions:                 actions,
 			}
 		}
 
@@ -373,9 +380,35 @@ func (s *Scheduler) setWorkers(workers []*v1.ListActiveWorkersResult) {
 
 func (s *Scheduler) addWorker(newWorker *v1.ListActiveWorkersResult) {
 	s.mustDo(func() {
+		var actions []string
+		if prev, ok := s.workers[newWorker.ID]; ok {
+			actions = prev.actions
+		}
 		s.workers[newWorker.ID] = &worker{
 			ListActiveWorkersResult: newWorker,
+			actions:                 actions,
 		}
+	})
+}
+
+func (s *Scheduler) setQueues(queues []string) {
+	s.mustDo(func() {
+		nextQueues := make(map[string]struct{}, len(queues))
+		for _, q := range queues {
+			if q != "" {
+				nextQueues[q] = struct{}{}
+			}
+		}
+		s.queues = nextQueues
+	})
+}
+
+func (s *Scheduler) addQueue(queueName string) {
+	if queueName == "" {
+		return
+	}
+	s.mustDo(func() {
+		s.queues[queueName] = struct{}{}
 	})
 }
 
@@ -505,6 +538,7 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 	checkpoint = time.Now()
 
 	actionsToWorkerIds := make(map[string][]uuid.UUID)
+	workersToActions := make(map[uuid.UUID][]string, len(workerIds))
 
 	for _, workerActionTuple := range workersToActiveActions {
 		if !workerActionTuple.ActionId.Valid {
@@ -515,6 +549,14 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 		workerId := workerActionTuple.WorkerId
 
 		actionsToWorkerIds[actionId] = append(actionsToWorkerIds[actionId], workerId)
+		workersToActions[workerId] = append(workersToActions[workerId], actionId)
+	}
+
+	for workerId, actions := range workersToActions {
+		if len(actions) > 1 {
+			slices.Sort(actions)
+			workersToActions[workerId] = slices.Compact(actions)
+		}
 	}
 
 	// Phase 3 (run loop): determine which actions should be replenished. Logic is
@@ -532,6 +574,12 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 	starvedActions := 0
 
 	if ok := s.do(ctx, func() {
+		for _, workerId := range workerIds {
+			if w, ok := s.workers[workerId]; ok {
+				w.actions = workersToActions[workerId]
+			}
+		}
+
 		scanNow := time.Now()
 
 		for actionId, workers := range actionsToWorkerIds {

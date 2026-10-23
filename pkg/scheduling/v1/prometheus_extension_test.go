@@ -310,3 +310,91 @@ func TestPrometheusExtensionCleanupTenantDeletesLabelPairs(t *testing.T) {
 
 	require.Empty(t, collectLabelPairSeries(t, prometheus.TenantWorkerLabelSlots, otherTenantId.String()))
 }
+
+func collectQueueSeries(t *testing.T, vec *promclient.GaugeVec, tenantId string) map[string]float64 {
+	t.Helper()
+
+	ch := make(chan promclient.Metric, 1024)
+	vec.Collect(ch)
+	close(ch)
+
+	out := make(map[string]float64)
+
+	for m := range ch {
+		var d dto.Metric
+		require.NoError(t, m.Write(&d))
+
+		labels := make(map[string]string, len(d.Label))
+		for _, lp := range d.Label {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+
+		if labels["tenant_id"] != tenantId {
+			continue
+		}
+
+		out[labels["queue"]] = d.GetGauge().GetValue()
+	}
+
+	return out
+}
+
+func TestPrometheusExtensionAggregatesWorkersAndSlotsByQueue(t *testing.T) {
+	ext := NewPrometheusExtension(nil)
+	defer func() { _ = ext.Cleanup() }()
+
+	tenantId := uuid.New()
+	worker1 := uuid.New()
+	worker2 := uuid.New()
+
+	workers := map[uuid.UUID]*WorkerCp{
+		worker1: {
+			WorkerId: worker1,
+			Name:     "worker-1",
+			Actions:  []string{"queue-a:run", "queue-b:run"},
+		},
+		worker2: {
+			WorkerId: worker2,
+			Name:     "worker-2",
+			Actions:  []string{"queue-a:run"},
+		},
+	}
+
+	utilizationByType := map[uuid.UUID]map[string]*SlotUtilization{
+		worker1: {repo.SlotTypeDefault: {UtilizedSlots: 1, NonUtilizedSlots: 0}},
+		worker2: {repo.SlotTypeDefault: {UtilizedSlots: 0, NonUtilizedSlots: 1}},
+	}
+
+	in := snapshotInput(workers, utilizationByType)
+	in.Queues = []string{"queue-a:run", "queue-empty:run"}
+
+	ext.ReportSnapshot(context.Background(), tenantId, in)
+
+	require.Equal(t, map[string]float64{
+		"queue-a:run":     2,
+		"queue-b:run":     1,
+		"queue-empty:run": 0,
+	}, collectQueueSeries(t, prometheus.TenantQueueActiveWorkers, tenantId.String()))
+
+	require.Equal(t, map[string]float64{
+		"queue-a:run":     2,
+		"queue-b:run":     1,
+		"queue-empty:run": 0,
+	}, collectQueueSeries(t, prometheus.TenantQueueWorkerSlots, tenantId.String()))
+
+	require.Equal(t, map[string]float64{
+		"queue-a:run":     1,
+		"queue-b:run":     1,
+		"queue-empty:run": 0,
+	}, collectQueueSeries(t, prometheus.TenantQueueUsedWorkerSlots, tenantId.String()))
+
+	require.Equal(t, map[string]float64{
+		"queue-a:run":     1,
+		"queue-b:run":     0,
+		"queue-empty:run": 0,
+	}, collectQueueSeries(t, prometheus.TenantQueueAvailableWorkerSlots, tenantId.String()))
+
+	require.NoError(t, ext.CleanupTenant(tenantId))
+	require.Empty(t, collectQueueSeries(t, prometheus.TenantQueueActiveWorkers, tenantId.String()))
+	require.Empty(t, collectQueueSeries(t, prometheus.TenantQueueUsedWorkerSlots, tenantId.String()))
+}

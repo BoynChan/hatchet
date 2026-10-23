@@ -566,25 +566,40 @@ GROUP BY
 -- name: GetQueueSizes :many
 WITH sizes AS (
     SELECT
-        queue,
-        workflow_id,
-        COUNT(*) AS count
+        qi.queue,
+        w."name" AS workflow_name,
+        COUNT(*) AS count,
+        MIN(qi.task_inserted_at) AS oldest_inserted_at
     FROM
-        v1_queue_item
+        v1_queue_item qi
+    JOIN "Workflow" w ON w."id" = qi.workflow_id
     WHERE
-        tenant_id = @tenantId::uuid
+        qi.tenant_id = @tenantId::uuid
     GROUP BY
-        queue, workflow_id
+        qi.queue, w."name"
+), known_queues AS (
+    SELECT
+        q.name AS queue,
+        COALESCE(w."name", split_part(q.name, ':', 1)) AS workflow_name
+    FROM
+        v1_queue q
+    LEFT JOIN "Workflow" w
+        ON w."tenantId" = q.tenant_id
+        AND w."name" = split_part(q.name, ':', 1)
+        AND w."deletedAt" IS NULL
+    WHERE
+        q.tenant_id = @tenantId::uuid
+    UNION
+    SELECT queue, workflow_name FROM sizes
 )
 SELECT
-    s.queue,
-    w."name" AS workflow_name,
-    SUM(s.count)::bigint AS count
+    kq.queue,
+    kq.workflow_name,
+    COALESCE(s.count, 0)::bigint AS count,
+    COALESCE(EXTRACT(EPOCH FROM GREATEST(NOW() - s.oldest_inserted_at, INTERVAL '0 seconds')), 0)::double precision AS oldest_age_seconds
 FROM
-    sizes s
-JOIN "Workflow" w ON w."id" = s.workflow_id
-GROUP BY
-    s.queue, w."name";
+    known_queues kq
+LEFT JOIN sizes s ON s.queue = kq.queue AND s.workflow_name = kq.workflow_name;
 
 -- name: GetQueueSizesByMetadata :many
 WITH working_set AS MATERIALIZED (

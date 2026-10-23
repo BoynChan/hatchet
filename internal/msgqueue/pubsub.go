@@ -3,6 +3,7 @@ package msgqueue
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -180,7 +181,11 @@ func PubTenantMessage(ctx context.Context, l *zerolog.Logger, mq MessageQueue, p
 		return nil
 	}
 
-	if err := ps.Pub(ctx, TenantTopic(msg.TenantID), msg); err != nil {
+	streamMsg, err := tenantStreamMessage(msg)
+	if err == nil {
+		err = ps.Pub(ctx, TenantTopic(msg.TenantID), streamMsg)
+	}
+	if err != nil {
 		if queue == nil {
 			return err
 		}
@@ -189,6 +194,45 @@ func PubTenantMessage(ctx context.Context, l *zerolog.Logger, mq MessageQueue, p
 	}
 
 	return nil
+}
+
+// tenantStreamMessage projects created-task events onto the fields used by
+// workflowEventConverters. Full task input belongs on the durable OLAP path;
+// keeping the stream copy small also preserves inline NOTIFY fanout.
+func tenantStreamMessage(msg *Message) (*Message, error) {
+	if msg.ID != MsgIDCreatedTask {
+		return msg, nil
+	}
+
+	payloads := msg.Payloads
+	if msg.Compressed {
+		var err error
+		payloads, err = DecompressPayloads(payloads)
+		if err != nil {
+			return nil, fmt.Errorf("decompress created-task stream copy: %w", err)
+		}
+	}
+
+	streamMsg := *msg
+	streamMsg.Compressed = false
+	streamMsg.Payloads = make([][]byte, len(payloads))
+	for i, payload := range payloads {
+		var event struct {
+			WorkflowRunID json.RawMessage `json:"workflow_run_id"`
+			ExternalID    json.RawMessage `json:"external_id"`
+			InsertedAt    json.RawMessage `json:"inserted_at"`
+			RetryCount    json.RawMessage `json:"retry_count"`
+		}
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return nil, fmt.Errorf("decode created-task stream copy: %w", err)
+		}
+		var err error
+		streamMsg.Payloads[i], err = json.Marshal(event)
+		if err != nil {
+			return nil, fmt.Errorf("encode created-task stream copy: %w", err)
+		}
+	}
+	return &streamMsg, nil
 }
 
 // gatedPubSub suppresses tenant-stream publishes when disabled, except

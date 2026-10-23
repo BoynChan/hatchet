@@ -224,6 +224,7 @@ VALUES (
     CASE WHEN $5::uuid IS NOT NULL THEN $5::uuid ELSE NULL END
 ) ON CONFLICT ("name") DO UPDATE
 SET
+    "lastActive" = NOW(),
     "durable" = $2::boolean,
     "autoDeleted" = $3::boolean,
     "exclusive" = $4::boolean,
