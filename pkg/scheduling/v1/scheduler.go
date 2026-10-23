@@ -26,6 +26,11 @@ const rateLimitedRequeueAfterThreshold = 2 * time.Second
 // database reads) must not hold assignment results hostage.
 const parkedAssignRetryTimeout = 100 * time.Millisecond
 
+// Release bursts share a fresh capacity read within this window. The first
+// release after an idle period refreshes immediately; sustained releases add
+// at most this much pacing before a read, independently of database latency.
+const releaseReplenishMinInterval = 50 * time.Millisecond
+
 // Scheduler is responsible for scheduling steps to workers as efficiently as possible.
 // This is tenant-scoped, so each tenant will have its own scheduler.
 //
@@ -67,6 +72,13 @@ type Scheduler struct {
 	replenishing         bool
 	replenishDone        chan struct{}
 	ackedDuringReplenish map[poolKey]int
+
+	// A completed cycle only covers releases received before that cycle began.
+	// Pace release-driven cycles separately so heuristic skips cannot postpone
+	// a pending release indefinitely.
+	replenishStartedAt            time.Time
+	completedReplenishStartedAt   time.Time
+	lastReleaseReplenishStartedAt time.Time
 
 	// afterReplenish holds assignment retries parked while a replenish cycle is
 	// in flight; they run on the loop as soon as the cycle ends. This preserves
@@ -438,13 +450,14 @@ func (s *Scheduler) replenish(ctx context.Context, mustReplenish bool) error {
 	return s.replenishSlots(ctx, mustReplenish, false)
 }
 
-// A release may commit after an in-flight refresh has read the database. Wait
-// for that refresh, then perform a new read before waking the affected queues.
+// A release needs a successful refresh started after its notification. Releases
+// waiting for the same fresh read share it before waking their affected queues.
 func (s *Scheduler) replenishAfterRelease(ctx context.Context) error {
 	return s.replenishSlots(ctx, true, true)
 }
 
 func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFreshRead bool) error {
+	requestedAt := time.Now()
 	ctx, span := telemetry.NewSpan(ctx, "replenish")
 	defer span.End()
 
@@ -459,15 +472,32 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 	var workerIds []uuid.UUID
 	for {
 		var inFlight <-chan struct{}
+		var delay time.Duration
+		fresh := false
 		skipped := false
 		if ok := s.do(ctx, func() {
+			if waitForFreshRead && !s.completedReplenishStartedAt.Before(requestedAt) {
+				fresh = true
+				return
+			}
 			if s.replenishing {
 				skipped = true
 				inFlight = s.replenishDone
 				return
 			}
 
+			if waitForFreshRead {
+				delay = time.Until(s.lastReleaseReplenishStartedAt.Add(releaseReplenishMinInterval))
+				if delay > 0 {
+					return
+				}
+			}
+
 			s.replenishing = true
+			s.replenishStartedAt = time.Now()
+			if waitForFreshRead {
+				s.lastReleaseReplenishStartedAt = s.replenishStartedAt
+			}
 			s.replenishDone = make(chan struct{})
 			s.ackedDuringReplenish = make(map[poolKey]int)
 
@@ -479,6 +509,23 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 			return ctx.Err()
 		}
 
+		if fresh {
+			telemetry.WithAttributes(span, telemetry.AttributeKV{Key: "replenish.coalesced_release", Value: true})
+			return nil
+		}
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-s.runDone:
+				timer.Stop()
+				return context.Canceled
+			}
+			continue
+		}
 		if !skipped {
 			break
 		}
@@ -499,6 +546,7 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 	// every exit path below must clear the replenishing flag; the apply op does
 	// it on success
 	applied := false
+	emptyForcedRefresh := false
 
 	defer func() {
 		if applied {
@@ -506,6 +554,11 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 		}
 
 		s.mustDo(func() {
+			// A forced cycle with no registered actions also satisfies a release;
+			// a heuristic skip or failed read cannot certify fresh capacity.
+			if emptyForcedRefresh {
+				s.completedReplenishStartedAt = s.replenishStartedAt
+			}
 			s.endReplenishCycle()
 		})
 	}()
@@ -637,6 +690,7 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 	checkpoint = time.Now()
 
 	if len(actionsToReplenish) == 0 {
+		emptyForcedRefresh = mustReplenish
 		telemetry.WithAttributes(span, telemetry.AttributeKV{Key: "replenish.skipped_empty", Value: true})
 		return nil
 	}
@@ -825,6 +879,7 @@ func (s *Scheduler) replenishSlots(ctx context.Context, mustReplenish, waitForFr
 
 		actionCount = len(s.actions)
 
+		s.completedReplenishStartedAt = s.replenishStartedAt
 		s.endReplenishCycle()
 		applied = true
 	}); !ok {
