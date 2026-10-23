@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
+
 	v1 "github.com/hatchet-dev/hatchet/pkg/scheduling/v1"
 )
 
