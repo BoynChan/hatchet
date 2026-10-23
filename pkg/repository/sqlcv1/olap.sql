@@ -2285,6 +2285,42 @@ FROM v1_payloads_olap
 WHERE
     tenant_id = @tenantId::UUID
     AND external_id = ANY(@externalIds::UUID[])
+    AND (
+        sqlc.narg('minInsertedAt')::TIMESTAMPTZ IS NULL
+        OR inserted_at >= sqlc.narg('minInsertedAt')::TIMESTAMPTZ
+    )
+    AND (
+        sqlc.narg('maxInsertedAt')::TIMESTAMPTZ IS NULL
+        OR inserted_at <= sqlc.narg('maxInsertedAt')::TIMESTAMPTZ
+    )
+;
+
+-- name: ReadWorkflowRunStatusByExternalId :one
+WITH lookup AS (
+    SELECT
+        tenant_id,
+        COALESCE(task_id, dag_id) AS run_id,
+        inserted_at
+    FROM
+        v1_lookup_table_olap
+    WHERE
+        external_id = @workflowRunExternalId::uuid
+)
+SELECT
+    r.tenant_id,
+    r.external_id,
+    r.inserted_at,
+    r.readable_status,
+    r.kind,
+    r.workflow_id,
+    r.workflow_version_id
+FROM
+    lookup lt
+JOIN
+    v1_runs_olap r ON r.inserted_at = lt.inserted_at AND r.id = lt.run_id AND r.tenant_id = lt.tenant_id
+ORDER BY
+    r.inserted_at DESC
+LIMIT 1
 ;
 
 -- name: ListWorkflowRunExternalIds :many

@@ -119,3 +119,43 @@ func TestPopulatorMiddlewareParentDisagreement(t *testing.T) {
 	// Assertions
 	assert.ErrorContains(t, err, "not authorized to access this resource")
 }
+
+func TestPopulatorMiddlewareWorkflowRunGetStatusUsesLightweightGetter(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	routeInfo := &middleware.RouteInfo{
+		OperationID: "v1-workflow-run:get-status",
+		Resources:   []string{"tenant", "v1-workflow-run"},
+	}
+
+	workflowRunId := uuid.New().String()
+	tenantId := uuid.New().String()
+
+	c.SetParamNames("v1-workflow-run")
+	c.SetParamValues(workflowRunId)
+
+	populator := NewPopulator(&server.ServerConfig{})
+
+	heavyGetterCalled := false
+	lightweightGetterCalled := false
+
+	populator.RegisterGetter("tenant", topLevelResourceGetter)
+	populator.RegisterGetter("v1-workflow-run", func(config *server.ServerConfig, parentId, id string) (interface{}, string, error) {
+		heavyGetterCalled = true
+		return &oneToManyResource{ID: id, ParentID: tenantId}, tenantId, nil
+	})
+	populator.RegisterGetter("v1-workflow-run-status", func(config *server.ServerConfig, parentId, id string) (interface{}, string, error) {
+		lightweightGetterCalled = true
+		return &oneToManyResource{ID: id, ParentID: tenantId}, tenantId, nil
+	})
+
+	err := populator.Middleware(routeInfo)(c)
+	assert.NoError(t, err)
+	assert.False(t, heavyGetterCalled, "v1-workflow-run getter should not be called for get-status")
+	assert.True(t, lightweightGetterCalled, "v1-workflow-run-status getter should be called for get-status")
+	assert.NotNil(t, c.Get("tenant"))
+	assert.NotNil(t, c.Get("v1-workflow-run-status"))
+}

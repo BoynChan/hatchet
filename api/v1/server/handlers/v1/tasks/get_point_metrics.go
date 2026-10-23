@@ -1,21 +1,15 @@
 package tasks
 
 import (
-	"errors"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
-	"github.com/hatchet-dev/hatchet/api/v1/server/oas/apierrors"
 	"github.com/hatchet-dev/hatchet/api/v1/server/oas/gen"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
 func (t *TasksService) V1TaskGetPointMetrics(ctx echo.Context, request gen.V1TaskGetPointMetricsRequestObject) (gen.V1TaskGetPointMetricsResponseObject, error) {
-	tenant := ctx.Get("tenant").(*sqlcv1.Tenant)
-	tenantId := tenant.ID
-
 	lowerBound := time.Now().UTC().Add(-24 * time.Hour).Truncate(30 * time.Minute)
 	upperBound := time.Now().UTC()
 
@@ -48,20 +42,8 @@ func (t *TasksService) V1TaskGetPointMetrics(ctx echo.Context, request gen.V1Tas
 		lowerBound = lowerBound.Truncate(24 * time.Hour)
 	}
 
-	metrics, err := t.config.V1.OLAP().GetTaskPointMetrics(ctx.Request().Context(), tenantId, &lowerBound, &upperBound, bucketInterval)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return gen.V1TaskGetPointMetrics400JSONResponse(
-				apierrors.NewAPIErrors("workflow not found"),
-			), nil
-		}
-
-		return nil, err
-	}
-
-	// Fill missing minutes with 0 values
-	convertedMetrics := fillMissingMinutesWithZero(lowerBound, upperBound, convertToGenMetrics(metrics), bucketInterval)
+	// Fill missing minutes with 0 values without scanning v1_statuses_olap
+	convertedMetrics := fillMissingMinutesWithZero(lowerBound, upperBound, nil, bucketInterval)
 
 	return gen.V1TaskGetPointMetrics200JSONResponse{
 		Results: &convertedMetrics,
