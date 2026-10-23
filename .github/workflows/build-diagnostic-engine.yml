@@ -80,6 +80,11 @@ jobs:
             -run 'Test(PubTenantMessage|PostgresPubSubRebindRetry|CreatedTaskStreamProjectionCompatibility|TenantStreamMsgIDsInSync)' -count=1
           go test -race -tags integration ./internal/msgqueue/postgres -run TestPostgres -count=1 -timeout 2m
 
+      - name: Test scheduler event backpressure
+        env:
+          SERVER_SECURITY_CHECK_ENABLED: "false"
+        run: go test -race ./internal/services/scheduler/v1 ./internal/msgqueue -count=1 -timeout 2m
+
       - name: Build engine
         env:
           ENGINE_VERSION: ${{ inputs.engine_version }}
