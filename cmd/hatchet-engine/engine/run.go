@@ -20,7 +20,6 @@ import (
 	"github.com/hatchet-dev/hatchet/internal/services/controllers/olap"
 	"github.com/hatchet-dev/hatchet/internal/services/controllers/retention"
 	"github.com/hatchet-dev/hatchet/internal/services/controllers/task"
-	"github.com/hatchet-dev/hatchet/internal/services/diagnostics"
 	"github.com/hatchet-dev/hatchet/internal/services/dispatcher"
 	"github.com/hatchet-dev/hatchet/internal/services/grpc"
 	"github.com/hatchet-dev/hatchet/internal/services/grpcoperator"
@@ -123,12 +122,6 @@ func Run(
 }
 
 func RunWithConfig(ctx context.Context, sc *server.ServerConfig, cleanup *cleanup.Cleanup) error {
-	stopDiagnostics, err := diagnostics.Start(ctx, sc.Diagnostics, sc.Logger)
-	if err != nil {
-		return fmt.Errorf("could not start diagnostics: %w", err)
-	}
-	cleanup.Add(stopDiagnostics, "diagnostics")
-
 	isV1 := sc.HasService("all") || sc.HasService("scheduler") || sc.HasService("controllers") || sc.HasService("grpc-api")
 
 	if isV1 {

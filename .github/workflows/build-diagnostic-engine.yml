@@ -69,13 +69,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Test memory diagnostics
-        env:
-          SERVER_SECURITY_CHECK_ENABLED: "false"
-        run: |
-          go test -race ./internal/services/diagnostics
-          go test ./pkg/config/loader -run TestDiagnostics -count=1
-
       - name: Test notification delivery
         env:
           SERVER_SECURITY_CHECK_ENABLED: "false"

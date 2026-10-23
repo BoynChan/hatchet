@@ -1000,7 +1000,6 @@ func createControllerLayer(dc *database.Layer, cf *server.ServerConfigFile, vers
 		Ingestor:               ing,
 		OpenTelemetry:          cf.OpenTelemetry,
 		Prometheus:             cf.Prometheus,
-		Diagnostics:            cf.Diagnostics,
 		PrometheusGate:         promGate,
 		Observability:          cf.Observability,
 		Email:                  emailSvc,
