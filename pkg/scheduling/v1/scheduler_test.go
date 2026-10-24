@@ -1548,14 +1548,15 @@ func TestScheduler_Replenish_CreatesActionAndSlots(t *testing.T) {
 	}
 }
 
-func TestScheduler_Replenish_RemovesActionWhenWorkerPoolHasNoCapacity(t *testing.T) {
+func TestScheduler_Replenish_KeepsActionWhenWorkerPoolHasNoCapacity(t *testing.T) {
 	tenantId := uuid.New()
 	workerId := uuid.New()
+	registeredAction := "A"
 
 	ar := &mockAssignmentRepo{
 		listActionsForWorkersFn: func(ctx context.Context, tenantId uuid.UUID, workerIds []uuid.UUID) ([]*sqlcv1.ListActionsForWorkersRow, error) {
 			return []*sqlcv1.ListActionsForWorkersRow{
-				{WorkerId: workerId, ActionId: sqlchelpers.TextFromStr("A")},
+				{WorkerId: workerId, ActionId: sqlchelpers.TextFromStr(registeredAction)},
 			}, nil
 		},
 		// simulate no rows returned => no new slots written
@@ -1580,9 +1581,18 @@ func TestScheduler_Replenish_RemovesActionWhenWorkerPoolHasNoCapacity(t *testing
 	require.NoError(t, err)
 
 	onLoop(t, s, func() {
-		_, ok := s.actions["A"]
-		require.False(t, ok)
+		require.Same(t, a, s.actions["A"])
+		require.Equal(t, []uuid.UUID{workerId}, a.workerIds)
+		require.Zero(t, a.lastReplenishedSlotCount)
+		require.Equal(t, 1, a.lastReplenishedWorkerCount)
 		require.Empty(t, s.pools[poolKey{workerId: workerId, slotType: repo.SlotTypeDefault}].slots)
+	})
+
+	registeredAction = "B"
+	require.NoError(t, s.replenish(context.Background(), true))
+	onLoop(t, s, func() {
+		require.NotContains(t, s.actions, "A", "unregistered actions are still removed")
+		require.Contains(t, s.actions, "B")
 	})
 }
 
@@ -1655,8 +1665,8 @@ func TestScheduler_Replenish_RefreshesAllWorkerPoolsWhenTriggered(t *testing.T) 
 		for _, pool := range s.pools {
 			require.Empty(t, pool.slots)
 		}
-		_, ok := s.actions["D"]
-		require.False(t, ok)
+		require.Same(t, actD, s.actions["D"])
+		require.Zero(t, actD.lastReplenishedSlotCount)
 	})
 }
 
