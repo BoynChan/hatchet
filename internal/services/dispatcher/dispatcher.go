@@ -620,7 +620,16 @@ func (d *DispatcherImpl) GetLocalWorkerIds() map[uuid.UUID]struct{} {
 	workerIds := make(map[uuid.UUID]struct{})
 
 	d.workers.Range(func(workerId uuid.UUID, value *syncx.Map[uuid.UUID, *subscribedWorker]) bool {
-		workerIds[workerId] = struct{}{}
+		hasActiveSession := false
+
+		value.Range(func(_ uuid.UUID, _ *subscribedWorker) bool {
+			hasActiveSession = true
+			return false
+		})
+
+		if hasActiveSession {
+			workerIds[workerId] = struct{}{}
+		}
 
 		return true
 	})
