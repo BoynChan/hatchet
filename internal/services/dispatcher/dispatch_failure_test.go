@@ -66,6 +66,41 @@ func TestWorkerRegistryCanRetainAnEmptySessionSet(t *testing.T) {
 	assert.Empty(t, sessions)
 }
 
+func TestGetLocalWorkerIdsExcludesWorkersWithoutActiveSessions(t *testing.T) {
+	d := &DispatcherImpl{workers: &workers{}}
+
+	activeWorkerID := uuid.New()
+	disconnectedWorkerID := uuid.New()
+	reconnectedWorkerID := uuid.New()
+
+	activeSessionID := uuid.New()
+	disconnectedSessionID := uuid.New()
+	oldSessionID := uuid.New()
+	newSessionID := uuid.New()
+
+	d.workers.Add(activeWorkerID, activeSessionID, &subscribedWorker{workerId: activeWorkerID})
+	d.workers.Add(disconnectedWorkerID, disconnectedSessionID, &subscribedWorker{workerId: disconnectedWorkerID})
+	d.workers.Add(reconnectedWorkerID, oldSessionID, &subscribedWorker{workerId: reconnectedWorkerID})
+	d.workers.Add(reconnectedWorkerID, newSessionID, &subscribedWorker{workerId: reconnectedWorkerID})
+
+	d.workers.DeleteForSession(disconnectedWorkerID, disconnectedSessionID)
+	d.workers.DeleteForSession(reconnectedWorkerID, oldSessionID)
+
+	localWorkerIDs := d.GetLocalWorkerIds()
+
+	assert.Contains(t, localWorkerIDs, activeWorkerID)
+	assert.Contains(t, localWorkerIDs, reconnectedWorkerID)
+	assert.NotContains(t, localWorkerIDs, disconnectedWorkerID)
+
+	d.workers.DeleteForSession(reconnectedWorkerID, newSessionID)
+
+	localWorkerIDs = d.GetLocalWorkerIds()
+
+	assert.Contains(t, localWorkerIDs, activeWorkerID)
+	assert.NotContains(t, localWorkerIDs, reconnectedWorkerID)
+	assert.NotContains(t, localWorkerIDs, disconnectedWorkerID)
+}
+
 func TestCombinedWorkerSendFailureReason(t *testing.T) {
 	assert.Equal(
 		t,
