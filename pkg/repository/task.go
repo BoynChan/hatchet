@@ -660,8 +660,10 @@ func (r *TaskRepositoryImpl) UpdateTablePartitions(ctx context.Context) error {
 		return fmt.Errorf("failed to delete idle stream topics: %w", err)
 	}
 
-	if err = r.updateStreamMessagePartitions(ctx); err != nil {
-		return fmt.Errorf("failed to update stream message partitions: %w", err)
+	if envBoolOrDefault("SERVER_STREAM_PARTITIONS_ENABLED", false) {
+		if err = r.updateStreamMessagePartitions(ctx); err != nil {
+			return fmt.Errorf("failed to update stream message partitions: %w", err)
+		}
 	}
 
 	// Runs last, in its own transaction, so that if it gives up on a lock, partition creation

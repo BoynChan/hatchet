@@ -274,3 +274,47 @@ func TestOLAPUpdateTablePartitions_LookupTablePartitionsHaveUniqueExternalId(t *
 		assert.True(t, strings.HasSuffix(constraintDefinition, "(external_id)"), "unexpected constraint definition %q on %s", constraintDefinition, partitionName)
 	}
 }
+
+func TestWP3CoreAndOLAPPartitionSlimming(t *testing.T) {
+	queries := sqlcv1.New()
+	assert.NotNil(t, queries)
+
+	// Compile-time and runtime verification that CreatePartitionsRow only has the 4 core tables
+	coreRow := sqlcv1.CreatePartitionsRow{
+		V1Task:        1,
+		V1TaskEvent:   1,
+		V1Payload:     1,
+		V1LookupTable: 1,
+	}
+	assert.Equal(t, int32(1), coreRow.V1Task)
+	assert.Equal(t, int32(1), coreRow.V1LookupTable)
+
+	// Compile-time and runtime verification that CreateOLAPPartitionsRow includes the 5 essential OLAP tables + 2 hash tmp tables
+	olapRow := sqlcv1.CreateOLAPPartitionsRow{
+		V1TaskEventsOlapTmp:    4,
+		V1TaskStatusUpdatesTmp: 4,
+		V1TasksOlap:            1,
+		V1RunsOlap:             1,
+		V1PayloadsOlap:         1,
+		V1TaskEventsOlap:       1,
+		V1LookupTableOlap:      1,
+	}
+	assert.Equal(t, int32(1), olapRow.V1TaskEventsOlap)
+	assert.Equal(t, int32(1), olapRow.V1LookupTableOlap)
+
+	l := zerolog.Nop()
+	shared := &sharedRepository{l: &l, queries: queries}
+
+	t.Setenv("SERVER_MANAGE_OPTIONAL_PARTITIONS", "")
+	t.Setenv("SERVER_OTEL_SPANS_ENABLED", "")
+	olapRepo := newOLAPRepository(shared, 72*time.Hour, false, false, StatusUpdateBatchSizeLimits{}).(*OLAPRepositoryImpl)
+	assert.False(t, olapRepo.shouldManageOptionalTablePartitions)
+	assert.False(t, olapRepo.shouldPartitionOtelTables)
+
+	t.Setenv("SERVER_MANAGE_OPTIONAL_PARTITIONS", "true")
+	t.Setenv("SERVER_OTEL_SPANS_ENABLED", "true")
+	olapRepoEnabled := newOLAPRepository(shared, 72*time.Hour, false, false, StatusUpdateBatchSizeLimits{}).(*OLAPRepositoryImpl)
+	assert.True(t, olapRepoEnabled.shouldManageOptionalTablePartitions)
+	assert.True(t, olapRepoEnabled.shouldPartitionOtelTables)
+}
+

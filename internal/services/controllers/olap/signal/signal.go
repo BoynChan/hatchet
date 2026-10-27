@@ -3,6 +3,9 @@ package signal
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -84,6 +87,14 @@ func (s *OLAPSignaler) SignalDAGsCreated(ctx context.Context, tenantId uuid.UUID
 	return nil
 }
 
+func publishCreatedTaskTenantStreamEnabled() bool {
+	if v := strings.TrimSpace(os.Getenv("SERVER_PUBLISH_CREATED_TASK_TENANT_STREAM")); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		return err == nil && enabled
+	}
+	return false
+}
+
 func (s *OLAPSignaler) SignalTasksCreated(ctx context.Context, tenantId uuid.UUID, tasks []*v1.V1TaskWithPayload) error {
 	// group tasks by initial states
 	queuedTasks := make([]*v1.V1TaskWithPayload, 0)
@@ -129,13 +140,15 @@ func (s *OLAPSignaler) SignalTasksCreated(ctx context.Context, tenantId uuid.UUI
 
 		// the durable write went through the pub buffer above; this publishes the
 		// stream copy the dispatcher's workflow event subscriptions consume
-		if err := msgqueue.PubTenantMessage(ctx, s.l, nil, s.pubsub, nil, msg); err != nil {
-			s.l.Warn().Ctx(ctx).Err(err).
-				Str("queue", task.Queue).Int64("task_id", task.ID).
-				Str("task_external_id", task.ExternalID.String()).
-				Str("workflow_run_id", task.WorkflowRunID.String()).
-				Int("task_payload_bytes", len(task.Payload)).
-				Msg("could not publish created-task to tenant stream")
+		if publishCreatedTaskTenantStreamEnabled() {
+			if err := msgqueue.PubTenantMessage(ctx, s.l, nil, s.pubsub, nil, msg); err != nil {
+				s.l.Warn().Ctx(ctx).Err(err).
+					Str("queue", task.Queue).Int64("task_id", task.ID).
+					Str("task_external_id", task.ExternalID.String()).
+					Str("workflow_run_id", task.WorkflowRunID.String()).
+					Int("task_payload_bytes", len(task.Payload)).
+					Msg("could not publish created-task to tenant stream")
+			}
 		}
 	}
 

@@ -1,19 +1,9 @@
 -- name: CreatePartitions :one
 SELECT
     create_v1_range_partition('v1_task', @date::date) AS v1_task,
-    create_v1_range_partition('v1_dag', @date::date) AS v1_dag,
     create_v1_range_partition('v1_task_event', @date::date) AS v1_task_event,
-    create_v1_range_partition('v1_log_line', @date::date) AS v1_log_line,
     create_v1_range_partition('v1_payload', @date::date) AS v1_payload,
-    create_v1_range_partition('v1_event', @date::date) AS v1_event,
-    create_v1_range_partition('v1_durable_event_log_file', @date::date) AS v1_durable_event_log_file,
-    create_v1_range_partition('v1_durable_event_log_entry', @date::date, 80) AS v1_durable_event_log_entry,
-    create_v1_range_partition('v1_durable_event_log_branch_point', @date::date, 80) AS v1_durable_event_log_branch_point,
-    create_v1_range_partition('v1_dag_to_task', @date::date) AS v1_dag_to_task,
-    create_v1_range_partition('v1_dag_data', @date::date) AS v1_dag_data,
-    create_v1_range_partition('v1_task_expression_eval', @date::date) AS v1_task_expression_eval,
-    create_v1_monthly_range_partition('v1_lookup_table', @date::date) AS v1_lookup_table,
-    create_v1_range_partition('v1_stream_producer_cursor', @date::date, 80) AS v1_stream_producer_cursor
+    create_v1_monthly_range_partition('v1_lookup_table', @date::date) AS v1_lookup_table
 ;
 
 -- name: EnsureTablePartitionsExist :one
@@ -23,21 +13,9 @@ WITH tomorrow_date AS (
     SELECT
         'v1_task_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD') AS expected_partition_name
     UNION ALL
-    SELECT 'v1_dag_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD')
-    UNION ALL
     SELECT 'v1_task_event_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD')
     UNION ALL
-    SELECT 'v1_log_line_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD')
-    UNION ALL
     SELECT 'v1_payload_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD')
-    UNION ALL
-    SELECT 'v1_event_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD')
-    UNION ALL
-    SELECT 'v1_durable_event_log_file_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD')
-    UNION ALL
-    SELECT 'v1_durable_event_log_entry_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD')
-    UNION ALL
-    SELECT 'v1_durable_event_log_branch_point_' || to_char((SELECT date FROM tomorrow_date), 'YYYYMMDD')
 ), partition_check AS (
     SELECT
         COUNT(*) AS total_tables,

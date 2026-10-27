@@ -574,8 +574,9 @@ SELECT
     create_v1_hash_partitions('v1_task_status_updates_tmp'::text, $1::int) AS v1_task_status_updates_tmp,
     create_v1_range_partition('v1_tasks_olap'::text, $2::date) AS v1_tasks_olap,
     create_v1_range_partition('v1_runs_olap'::text, $2::date) AS v1_runs_olap,
-    create_v1_range_partition('v1_dags_olap'::text, $2::date) AS v1_dags_olap,
-    create_v1_range_partition('v1_payloads_olap'::text, $2::date) AS v1_payloads_olap
+    create_v1_range_partition('v1_payloads_olap'::text, $2::date) AS v1_payloads_olap,
+    create_v1_range_partition('v1_task_events_olap'::text, $2::date) AS v1_task_events_olap,
+    create_v1_monthly_range_partition('v1_lookup_table_olap'::text, $2::date) AS v1_lookup_table_olap
 `
 
 type CreateOLAPPartitionsParams struct {
@@ -588,8 +589,9 @@ type CreateOLAPPartitionsRow struct {
 	V1TaskStatusUpdatesTmp int32 `json:"v1_task_status_updates_tmp"`
 	V1TasksOlap            int32 `json:"v1_tasks_olap"`
 	V1RunsOlap             int32 `json:"v1_runs_olap"`
-	V1DagsOlap             int32 `json:"v1_dags_olap"`
 	V1PayloadsOlap         int32 `json:"v1_payloads_olap"`
+	V1TaskEventsOlap       int32 `json:"v1_task_events_olap"`
+	V1LookupTableOlap      int32 `json:"v1_lookup_table_olap"`
 }
 
 func (q *Queries) CreateOLAPPartitions(ctx context.Context, db DBTX, arg CreateOLAPPartitionsParams) (*CreateOLAPPartitionsRow, error) {
@@ -600,8 +602,9 @@ func (q *Queries) CreateOLAPPartitions(ctx context.Context, db DBTX, arg CreateO
 		&i.V1TaskStatusUpdatesTmp,
 		&i.V1TasksOlap,
 		&i.V1RunsOlap,
-		&i.V1DagsOlap,
 		&i.V1PayloadsOlap,
+		&i.V1TaskEventsOlap,
+		&i.V1LookupTableOlap,
 	)
 	return &i, err
 }
@@ -1749,9 +1752,7 @@ WHERE
             'v1_event_lookup_table_olap',
             'v1_cel_evaluation_failures_olap',
             'v1_incoming_webhook_validation_failures_olap',
-            'v1_task_events_olap',
             'v1_dag_to_task_olap',
-            'v1_lookup_table_olap',
             'v1_statuses_olap'
         )
     END

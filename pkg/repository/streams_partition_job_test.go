@@ -22,6 +22,7 @@ func TestStreamsPartitionJob(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
+	t.Setenv("SERVER_STREAM_PARTITIONS_ENABLED", "true")
 	repo := createTaskRepository(pool)
 	config := defaultLimitTestConfig()
 	config.DefaultTenantRetentionPeriod = "24h"
@@ -43,6 +44,8 @@ func TestStreamsPartitionJob(t *testing.T) {
 
 	for _, d := range []int{-2, -10} {
 		_, err := queries.CreatePartitions(ctx, pool, pgtype.Date{Time: today.AddDate(0, 0, d), Valid: true})
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "SELECT create_v1_range_partition('v1_stream_producer_cursor', $1::date, 80)", pgtype.Date{Time: today.AddDate(0, 0, d), Valid: true})
 		require.NoError(t, err)
 	}
 
