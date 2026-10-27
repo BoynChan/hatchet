@@ -4,8 +4,9 @@ SELECT
     create_v1_hash_partitions('v1_task_status_updates_tmp'::text, @partitions::int) AS v1_task_status_updates_tmp,
     create_v1_range_partition('v1_tasks_olap'::text, @date::date) AS v1_tasks_olap,
     create_v1_range_partition('v1_runs_olap'::text, @date::date) AS v1_runs_olap,
-    create_v1_range_partition('v1_dags_olap'::text, @date::date) AS v1_dags_olap,
-    create_v1_range_partition('v1_payloads_olap'::text, @date::date) AS v1_payloads_olap
+    create_v1_range_partition('v1_payloads_olap'::text, @date::date) AS v1_payloads_olap,
+    create_v1_range_partition('v1_task_events_olap'::text, @date::date) AS v1_task_events_olap,
+    create_v1_monthly_range_partition('v1_lookup_table_olap'::text, @date::date) AS v1_lookup_table_olap
 ;
 
 -- name: CreateOLAPOptionalTablePartitions :one
@@ -213,9 +214,7 @@ WHERE
             'v1_event_lookup_table_olap',
             'v1_cel_evaluation_failures_olap',
             'v1_incoming_webhook_validation_failures_olap',
-            'v1_task_events_olap',
             'v1_dag_to_task_olap',
-            'v1_lookup_table_olap',
             'v1_statuses_olap'
         )
     END

@@ -1,6 +1,7 @@
 package olap
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -8,10 +9,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
+	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
 func Test_buildWorkflowRunRootSpan_creates_when_no_sdk_traceparent(t *testing.T) {
@@ -187,3 +190,71 @@ func hexMustDecode(t *testing.T, s string) []byte {
 	require.NoError(t, err)
 	return b
 }
+
+type fakeOLAPRepoForSpans struct {
+	v1.OLAPRepository
+	createdSpans  int
+	createdLookup int
+}
+
+func (f *fakeOLAPRepoForSpans) CreateSpans(_ context.Context, _ uuid.UUID, opts *v1.CreateSpansOpts) error {
+	f.createdSpans += len(opts.Spans)
+	return nil
+}
+
+func (f *fakeOLAPRepoForSpans) CreateSpanLookupTableEntries(_ context.Context, _ uuid.UUID, opts *v1.CreateSpansOpts) error {
+	f.createdLookup += len(opts.Spans)
+	return nil
+}
+
+func (f *fakeOLAPRepoForSpans) GetTaskStartedTimestamps(_ context.Context, _ uuid.UUID, _ []int64, _ []time.Time, _ []int32) ([]*sqlcv1.GetTaskStartedTimestampsRow, error) {
+	return nil, nil
+}
+
+type fakeRepoForSpans struct {
+	v1.Repository
+	olap v1.OLAPRepository
+}
+
+func (f *fakeRepoForSpans) OLAP() v1.OLAPRepository {
+	return f.olap
+}
+
+func TestWriteEngineSpans_DefaultDisabledAndEnvToggle(t *testing.T) {
+	tenantID := uuid.New()
+	wfRunID := uuid.New()
+	wfID := uuid.New()
+	now := time.Now()
+	span := buildWorkflowRunRootSpan(tenantID, wfRunID, wfID, "my-workflow", now, nil)
+
+	fakeOLAP := &fakeOLAPRepoForSpans{}
+	l := zerolog.Nop()
+	tc := &OLAPControllerImpl{
+		l:    &l,
+		repo: &fakeRepoForSpans{olap: fakeOLAP},
+	}
+
+	// Default (env unset): must skip writing spans and synthesizing spans.
+	t.Setenv("SERVER_OTEL_SPANS_ENABLED", "")
+	tc.writeEngineSpans(context.Background(), tenantID, []*v1.SpanData{span}, "test")
+	tc.synthesizeEngineSpans(context.Background(), tenantID, []engineSpanEvent{
+		{
+			taskID:         1,
+			insertedAt:     now,
+			taskInsertedAt: now,
+			eventTimestamp: now,
+			eventType:      sqlcv1.V1EventTypeOlapFINISHED,
+			externalID:     uuid.New(),
+			workflowRunID:  wfRunID,
+		},
+	})
+	assert.Equal(t, 0, fakeOLAP.createdSpans, "spans must be skipped by default")
+	assert.Equal(t, 0, fakeOLAP.createdLookup, "span lookup entries must be skipped by default")
+
+	// Explicitly enabled via SERVER_OTEL_SPANS_ENABLED=true: must write spans.
+	t.Setenv("SERVER_OTEL_SPANS_ENABLED", "true")
+	tc.writeEngineSpans(context.Background(), tenantID, []*v1.SpanData{span}, "test")
+	assert.Equal(t, 1, fakeOLAP.createdSpans)
+	assert.Equal(t, 1, fakeOLAP.createdLookup)
+}
+

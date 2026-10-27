@@ -10,8 +10,11 @@ import (
 	"hash/fnv"
 	"log"
 	"math/rand"
+	"os"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -358,12 +361,24 @@ func NewOLAPRepositoryFromPool(
 	return newOLAPRepository(shared, olapRetentionPeriod, shouldManageOptionalTablePartitions, shouldPartitionOtelTables, statusUpdateBatchSizeLimits), cleanupShared
 }
 
+func envBoolOrDefault(key string, defaultVal bool) bool {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			return parsed
+		}
+	}
+	return defaultVal
+}
+
 func newOLAPRepository(shared *sharedRepository, olapRetentionPeriod time.Duration, shouldManageOptionalTablePartitions bool, shouldPartitionOtelTables bool, statusUpdateBatchSizeLimits StatusUpdateBatchSizeLimits) OLAPRepository {
 	eventCache, err := lru.New[string, bool](100000)
 
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	shouldManageOptionalTablePartitions = envBoolOrDefault("SERVER_MANAGE_OPTIONAL_PARTITIONS", shouldManageOptionalTablePartitions)
+	shouldPartitionOtelTables = envBoolOrDefault("SERVER_OTEL_SPANS_ENABLED", shouldPartitionOtelTables)
 
 	return &OLAPRepositoryImpl{
 		sharedRepository:                    shared,
@@ -462,7 +477,15 @@ func (r *OLAPRepositoryImpl) UpdateTablePartitions(ctx context.Context) error {
 		}
 
 		if todayCreations.V1PayloadsOlap > 0 {
-			return createExternalIdUniqueConstraintsOnDailyPartitions(ctx, tx, "v1_payloads_olap", today)
+			if err := createExternalIdUniqueConstraintsOnDailyPartitions(ctx, tx, "v1_payloads_olap", today); err != nil {
+				return err
+			}
+		}
+
+		if todayCreations.V1LookupTableOlap > 0 {
+			if err := createExternalIdUniqueConstraintsOnMonthlyPartitions(ctx, tx, "v1_lookup_table_olap", today); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -497,7 +520,15 @@ func (r *OLAPRepositoryImpl) UpdateTablePartitions(ctx context.Context) error {
 		}
 
 		if tomorrowCreations.V1PayloadsOlap > 0 {
-			return createExternalIdUniqueConstraintsOnDailyPartitions(ctx, tx, "v1_payloads_olap", tomorrow)
+			if err := createExternalIdUniqueConstraintsOnDailyPartitions(ctx, tx, "v1_payloads_olap", tomorrow); err != nil {
+				return err
+			}
+		}
+
+		if tomorrowCreations.V1LookupTableOlap > 0 {
+			if err := createExternalIdUniqueConstraintsOnMonthlyPartitions(ctx, tx, "v1_lookup_table_olap", tomorrow); err != nil {
+				return err
+			}
 		}
 
 		return nil

@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,8 +53,16 @@ type eventEmittedAccumulator struct {
 	eventExternalID             uuid.UUID
 }
 
+func engineSpansEnabled() bool {
+	if v := strings.TrimSpace(os.Getenv("SERVER_OTEL_SPANS_ENABLED")); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		return err == nil && enabled
+	}
+	return false
+}
+
 func (tc *OLAPControllerImpl) writeEngineSpans(ctx context.Context, tenantId uuid.UUID, spans []*v1.SpanData, label string) {
-	if len(spans) == 0 {
+	if len(spans) == 0 || !engineSpansEnabled() {
 		return
 	}
 
@@ -396,7 +406,7 @@ func buildEventEmittedSpan(
 }
 
 func (tc *OLAPControllerImpl) synthesizeEngineSpans(ctx context.Context, tenantId uuid.UUID, events []engineSpanEvent) {
-	if len(events) == 0 {
+	if len(events) == 0 || !engineSpansEnabled() {
 		return
 	}
 
