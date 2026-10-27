@@ -258,8 +258,8 @@ func TestUpdateTablePartitions_RealPartitionCreation(t *testing.T) {
 	require.NoError(t, err)
 
 	// The migration already creates partitions for today, so we should only see tomorrow's partitions created
-	// Tomorrow's partitions: 4 tables = 4 new partitions
-	expectedIncrease := 4
+	// Tomorrow's partitions among these 4 tables: only v1_task and v1_task_event (v1_dag and v1_log_line are disabled in WP3)
+	expectedIncrease := 2
 	assert.Equal(t, countBefore+expectedIncrease, countAfter, "Should have created partitions for tomorrow (today already exists from migration)")
 
 	t.Logf("Partitions before: %d, after: %d (increase: %d)", countBefore, countAfter, countAfter-countBefore)
