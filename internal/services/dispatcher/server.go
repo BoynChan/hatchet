@@ -370,7 +370,16 @@ func (s *DispatcherImpl) ListenV2(ctx context.Context, request *contracts.Worker
 
 	fin := make(chan bool)
 
-	s.workers.Add(workerId, sessionId, newGRPCSubscribedWorker(stream, fin, workerId, s.defaultMaxWorkerLockAcquisitionTime, s.pubBuffer))
+	subscription := newGRPCSubscribedWorker(stream, fin, workerId, s.defaultMaxWorkerLockAcquisitionTime, s.pubBuffer)
+	var reconcile <-chan time.Time
+	if request.RecoverDeliveries {
+		subscription.deliveries = s.repov1.Workers()
+		subscription.sessionID = sessionId
+		ticker := time.NewTicker(HeartbeatInterval)
+		defer ticker.Stop()
+		reconcile = ticker.C
+	}
+	s.workers.Add(workerId, sessionId, subscription)
 
 	defer func() {
 		// non-blocking send
@@ -383,8 +392,17 @@ func (s *DispatcherImpl) ListenV2(ctx context.Context, request *contracts.Worker
 	}()
 
 	// Keep the connection alive for sending messages
+	if request.RecoverDeliveries {
+		if err := subscription.recoverDeliveries(ctx, tenantId); err != nil {
+			s.l.Warn().Err(err).Msg("could not reconcile worker deliveries on connect")
+		}
+	}
 	for {
 		select {
+		case <-reconcile:
+			if err := subscription.recoverDeliveries(ctx, tenantId); err != nil {
+				s.l.Warn().Err(err).Msg("could not reconcile worker deliveries")
+			}
 		case <-fin:
 			s.l.Debug().Ctx(ctx).Msgf("closing stream for worker id: %s", request.WorkerId)
 

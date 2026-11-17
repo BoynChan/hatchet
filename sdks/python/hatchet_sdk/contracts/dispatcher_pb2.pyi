@@ -181,7 +181,7 @@ class UpsertWorkerLabelsResponse(_message.Message):
     def __init__(self, tenant_id: _Optional[str] = ..., worker_id: _Optional[str] = ...) -> None: ...
 
 class AssignedAction(_message.Message):
-    __slots__ = ("tenant_id", "workflow_run_id", "get_group_key_run_id", "job_id", "job_name", "job_run_id", "task_id", "task_run_external_id", "action_id", "action_type", "action_payload", "task_name", "retry_count", "additional_metadata", "child_workflow_index", "child_workflow_key", "parent_workflow_run_id", "priority", "workflow_id", "workflow_version_id", "durable_task_invocation_count", "triggering_event_external_id", "triggering_event_key", "batchId", "batchSize", "batchIndex", "batchStartPayload", "batchKey", "task_inserted_at")
+    __slots__ = ("tenant_id", "workflow_run_id", "get_group_key_run_id", "job_id", "job_name", "job_run_id", "task_id", "task_run_external_id", "action_id", "action_type", "action_payload", "task_name", "retry_count", "additional_metadata", "child_workflow_index", "child_workflow_key", "parent_workflow_run_id", "priority", "workflow_id", "workflow_version_id", "durable_task_invocation_count", "triggering_event_external_id", "triggering_event_key", "batchId", "batchSize", "batchIndex", "batchStartPayload", "batchKey", "task_inserted_at", "delivery_id", "listener_session_id")
     TENANT_ID_FIELD_NUMBER: _ClassVar[int]
     WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
     GET_GROUP_KEY_RUN_ID_FIELD_NUMBER: _ClassVar[int]
@@ -211,6 +211,8 @@ class AssignedAction(_message.Message):
     BATCHSTARTPAYLOAD_FIELD_NUMBER: _ClassVar[int]
     BATCHKEY_FIELD_NUMBER: _ClassVar[int]
     TASK_INSERTED_AT_FIELD_NUMBER: _ClassVar[int]
+    DELIVERY_ID_FIELD_NUMBER: _ClassVar[int]
+    LISTENER_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     tenant_id: str
     workflow_run_id: str
     get_group_key_run_id: str
@@ -240,7 +242,9 @@ class AssignedAction(_message.Message):
     batchStartPayload: BatchStartPayload
     batchKey: str
     task_inserted_at: _timestamp_pb2.Timestamp
-    def __init__(self, tenant_id: _Optional[str] = ..., workflow_run_id: _Optional[str] = ..., get_group_key_run_id: _Optional[str] = ..., job_id: _Optional[str] = ..., job_name: _Optional[str] = ..., job_run_id: _Optional[str] = ..., task_id: _Optional[str] = ..., task_run_external_id: _Optional[str] = ..., action_id: _Optional[str] = ..., action_type: _Optional[_Union[ActionType, str]] = ..., action_payload: _Optional[str] = ..., task_name: _Optional[str] = ..., retry_count: _Optional[int] = ..., additional_metadata: _Optional[str] = ..., child_workflow_index: _Optional[int] = ..., child_workflow_key: _Optional[str] = ..., parent_workflow_run_id: _Optional[str] = ..., priority: _Optional[int] = ..., workflow_id: _Optional[str] = ..., workflow_version_id: _Optional[str] = ..., durable_task_invocation_count: _Optional[int] = ..., triggering_event_external_id: _Optional[str] = ..., triggering_event_key: _Optional[str] = ..., batchId: _Optional[str] = ..., batchSize: _Optional[int] = ..., batchIndex: _Optional[int] = ..., batchStartPayload: _Optional[_Union[BatchStartPayload, _Mapping]] = ..., batchKey: _Optional[str] = ..., task_inserted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    delivery_id: str
+    listener_session_id: str
+    def __init__(self, tenant_id: _Optional[str] = ..., workflow_run_id: _Optional[str] = ..., get_group_key_run_id: _Optional[str] = ..., job_id: _Optional[str] = ..., job_name: _Optional[str] = ..., job_run_id: _Optional[str] = ..., task_id: _Optional[str] = ..., task_run_external_id: _Optional[str] = ..., action_id: _Optional[str] = ..., action_type: _Optional[_Union[ActionType, str]] = ..., action_payload: _Optional[str] = ..., task_name: _Optional[str] = ..., retry_count: _Optional[int] = ..., additional_metadata: _Optional[str] = ..., child_workflow_index: _Optional[int] = ..., child_workflow_key: _Optional[str] = ..., parent_workflow_run_id: _Optional[str] = ..., priority: _Optional[int] = ..., workflow_id: _Optional[str] = ..., workflow_version_id: _Optional[str] = ..., durable_task_invocation_count: _Optional[int] = ..., triggering_event_external_id: _Optional[str] = ..., triggering_event_key: _Optional[str] = ..., batchId: _Optional[str] = ..., batchSize: _Optional[int] = ..., batchIndex: _Optional[int] = ..., batchStartPayload: _Optional[_Union[BatchStartPayload, _Mapping]] = ..., batchKey: _Optional[str] = ..., task_inserted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., delivery_id: _Optional[str] = ..., listener_session_id: _Optional[str] = ...) -> None: ...
 
 class BatchStartPayload(_message.Message):
     __slots__ = ("triggerReason", "triggerTime", "expectedSize")
@@ -252,11 +256,31 @@ class BatchStartPayload(_message.Message):
     expectedSize: int
     def __init__(self, triggerReason: _Optional[str] = ..., triggerTime: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., expectedSize: _Optional[int] = ...) -> None: ...
 
-class WorkerListenRequest(_message.Message):
-    __slots__ = ("worker_id",)
+class ClaimDeliveryRequest(_message.Message):
+    __slots__ = ("worker_id", "listener_session_id", "delivery_id", "receipt_id")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    LISTENER_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    DELIVERY_ID_FIELD_NUMBER: _ClassVar[int]
+    RECEIPT_ID_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
-    def __init__(self, worker_id: _Optional[str] = ...) -> None: ...
+    listener_session_id: str
+    delivery_id: str
+    receipt_id: str
+    def __init__(self, worker_id: _Optional[str] = ..., listener_session_id: _Optional[str] = ..., delivery_id: _Optional[str] = ..., receipt_id: _Optional[str] = ...) -> None: ...
+
+class ClaimDeliveryResponse(_message.Message):
+    __slots__ = ("accepted",)
+    ACCEPTED_FIELD_NUMBER: _ClassVar[int]
+    accepted: bool
+    def __init__(self, accepted: bool = ...) -> None: ...
+
+class WorkerListenRequest(_message.Message):
+    __slots__ = ("worker_id", "recover_deliveries")
+    WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    RECOVER_DELIVERIES_FIELD_NUMBER: _ClassVar[int]
+    worker_id: str
+    recover_deliveries: bool
+    def __init__(self, worker_id: _Optional[str] = ..., recover_deliveries: bool = ...) -> None: ...
 
 class WorkerUnsubscribeRequest(_message.Message):
     __slots__ = ("worker_id",)

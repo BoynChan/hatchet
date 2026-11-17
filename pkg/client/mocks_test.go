@@ -40,6 +40,10 @@ type mockDispatcherClient struct {
 	subscribeToWorkflowEventsFn func(ctx context.Context, in *dispatchercontracts.SubscribeToWorkflowEventsRequest, opts ...grpc.CallOption) (dispatchercontracts.Dispatcher_SubscribeToWorkflowEventsClient, error)
 }
 
+func (m *mockDispatcherClient) ClaimDelivery(context.Context, *dispatchercontracts.ClaimDeliveryRequest, ...grpc.CallOption) (*dispatchercontracts.ClaimDeliveryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not implemented")
+}
+
 func (m *mockDispatcherClient) Register(ctx context.Context, in *dispatchercontracts.WorkerRegisterRequest, opts ...grpc.CallOption) (*dispatchercontracts.WorkerRegisterResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not implemented")
 }
@@ -314,6 +318,10 @@ func (m *mockListenV2Client) RecvMsg(msg interface{}) error { return nil }
 type mockWorkerDispatcherClient struct {
 	listenV2Fn func(ctx context.Context, in *dispatchercontracts.WorkerListenRequest, opts ...grpc.CallOption) (dispatchercontracts.Dispatcher_ListenV2Client, error)
 	listenFn   func(ctx context.Context, in *dispatchercontracts.WorkerListenRequest, opts ...grpc.CallOption) (dispatchercontracts.Dispatcher_ListenClient, error)
+}
+
+func (m *mockWorkerDispatcherClient) ClaimDelivery(context.Context, *dispatchercontracts.ClaimDeliveryRequest, ...grpc.CallOption) (*dispatchercontracts.ClaimDeliveryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not implemented")
 }
 
 func (m *mockWorkerDispatcherClient) Register(ctx context.Context, in *dispatchercontracts.WorkerRegisterRequest, opts ...grpc.CallOption) (*dispatchercontracts.WorkerRegisterResponse, error) {

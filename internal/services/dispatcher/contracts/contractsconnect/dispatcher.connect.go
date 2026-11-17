@@ -35,6 +35,9 @@ const (
 const (
 	// DispatcherRegisterProcedure is the fully-qualified name of the Dispatcher's Register RPC.
 	DispatcherRegisterProcedure = "/Dispatcher/Register"
+	// DispatcherClaimDeliveryProcedure is the fully-qualified name of the Dispatcher's ClaimDelivery
+	// RPC.
+	DispatcherClaimDeliveryProcedure = "/Dispatcher/ClaimDelivery"
 	// DispatcherListenProcedure is the fully-qualified name of the Dispatcher's Listen RPC.
 	DispatcherListenProcedure = "/Dispatcher/Listen"
 	// DispatcherListenV2Procedure is the fully-qualified name of the Dispatcher's ListenV2 RPC.
@@ -79,6 +82,8 @@ const (
 // DispatcherClient is a client for the Dispatcher service.
 type DispatcherClient interface {
 	Register(context.Context, *contracts.WorkerRegisterRequest) (*contracts.WorkerRegisterResponse, error)
+	// Authorize one consumer of a recoverable start before invoking user code.
+	ClaimDelivery(context.Context, *contracts.ClaimDeliveryRequest) (*contracts.ClaimDeliveryResponse, error)
 	Listen(context.Context, *contracts.WorkerListenRequest) (*connect.ServerStreamForClient[contracts.AssignedAction], error)
 	// ListenV2 is like listen, but implementation does not include heartbeats. This should only used by SDKs
 	// against engine version v0.18.1+
@@ -119,6 +124,12 @@ func NewDispatcherClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			httpClient,
 			baseURL+DispatcherRegisterProcedure,
 			connect.WithSchema(dispatcherMethods.ByName("Register")),
+			connect.WithClientOptions(opts...),
+		),
+		claimDelivery: connect.NewClient[contracts.ClaimDeliveryRequest, contracts.ClaimDeliveryResponse](
+			httpClient,
+			baseURL+DispatcherClaimDeliveryProcedure,
+			connect.WithSchema(dispatcherMethods.ByName("ClaimDelivery")),
 			connect.WithClientOptions(opts...),
 		),
 		listen: connect.NewClient[contracts.WorkerListenRequest, contracts.AssignedAction](
@@ -217,6 +228,7 @@ func NewDispatcherClient(httpClient connect.HTTPClient, baseURL string, opts ...
 // dispatcherClient implements DispatcherClient.
 type dispatcherClient struct {
 	register                  *connect.Client[contracts.WorkerRegisterRequest, contracts.WorkerRegisterResponse]
+	claimDelivery             *connect.Client[contracts.ClaimDeliveryRequest, contracts.ClaimDeliveryResponse]
 	listen                    *connect.Client[contracts.WorkerListenRequest, contracts.AssignedAction]
 	listenV2                  *connect.Client[contracts.WorkerListenRequest, contracts.AssignedAction]
 	heartbeat                 *connect.Client[contracts.HeartbeatRequest, contracts.HeartbeatResponse]
@@ -237,6 +249,15 @@ type dispatcherClient struct {
 // Register calls Dispatcher.Register.
 func (c *dispatcherClient) Register(ctx context.Context, req *contracts.WorkerRegisterRequest) (*contracts.WorkerRegisterResponse, error) {
 	response, err := c.register.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
+}
+
+// ClaimDelivery calls Dispatcher.ClaimDelivery.
+func (c *dispatcherClient) ClaimDelivery(ctx context.Context, req *contracts.ClaimDeliveryRequest) (*contracts.ClaimDeliveryResponse, error) {
+	response, err := c.claimDelivery.CallUnary(ctx, connect.NewRequest(req))
 	if response != nil {
 		return response.Msg, err
 	}
@@ -365,6 +386,8 @@ func (c *dispatcherClient) GetVersion(ctx context.Context, req *contracts.GetVer
 // DispatcherHandler is an implementation of the Dispatcher service.
 type DispatcherHandler interface {
 	Register(context.Context, *contracts.WorkerRegisterRequest) (*contracts.WorkerRegisterResponse, error)
+	// Authorize one consumer of a recoverable start before invoking user code.
+	ClaimDelivery(context.Context, *contracts.ClaimDeliveryRequest) (*contracts.ClaimDeliveryResponse, error)
 	Listen(context.Context, *contracts.WorkerListenRequest, *connect.ServerStream[contracts.AssignedAction]) error
 	// ListenV2 is like listen, but implementation does not include heartbeats. This should only used by SDKs
 	// against engine version v0.18.1+
@@ -401,6 +424,12 @@ func NewDispatcherHandler(svc DispatcherHandler, opts ...connect.HandlerOption) 
 		DispatcherRegisterProcedure,
 		svc.Register,
 		connect.WithSchema(dispatcherMethods.ByName("Register")),
+		connect.WithHandlerOptions(opts...),
+	)
+	dispatcherClaimDeliveryHandler := connect.NewUnaryHandlerSimple(
+		DispatcherClaimDeliveryProcedure,
+		svc.ClaimDelivery,
+		connect.WithSchema(dispatcherMethods.ByName("ClaimDelivery")),
 		connect.WithHandlerOptions(opts...),
 	)
 	dispatcherListenHandler := connect.NewServerStreamHandlerSimple(
@@ -497,6 +526,8 @@ func NewDispatcherHandler(svc DispatcherHandler, opts ...connect.HandlerOption) 
 		switch r.URL.Path {
 		case DispatcherRegisterProcedure:
 			dispatcherRegisterHandler.ServeHTTP(w, r)
+		case DispatcherClaimDeliveryProcedure:
+			dispatcherClaimDeliveryHandler.ServeHTTP(w, r)
 		case DispatcherListenProcedure:
 			dispatcherListenHandler.ServeHTTP(w, r)
 		case DispatcherListenV2Procedure:
@@ -538,6 +569,10 @@ type UnimplementedDispatcherHandler struct{}
 
 func (UnimplementedDispatcherHandler) Register(context.Context, *contracts.WorkerRegisterRequest) (*contracts.WorkerRegisterResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Dispatcher.Register is not implemented"))
+}
+
+func (UnimplementedDispatcherHandler) ClaimDelivery(context.Context, *contracts.ClaimDeliveryRequest) (*contracts.ClaimDeliveryResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Dispatcher.ClaimDelivery is not implemented"))
 }
 
 func (UnimplementedDispatcherHandler) Listen(context.Context, *contracts.WorkerListenRequest, *connect.ServerStream[contracts.AssignedAction]) error {

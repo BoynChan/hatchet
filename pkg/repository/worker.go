@@ -111,6 +111,7 @@ type DurableTaskDispatcherLookup struct {
 }
 
 type WorkerRepository interface {
+	WorkerDeliveries
 	ListWorkers(ctx context.Context, tenantId uuid.UUID, opts *ListWorkersOpts) ([]*sqlcv1.ListWorkersRow, int64, error)
 	GetWorkerById(ctx context.Context, workerId uuid.UUID) (*sqlcv1.GetWorkerByIdRow, error)
 	ListTotalActiveSlotsPerTenant(ctx context.Context) (map[uuid.UUID]int64, error)

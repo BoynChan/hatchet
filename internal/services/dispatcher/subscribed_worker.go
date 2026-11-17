@@ -11,11 +11,14 @@ import (
 	"github.com/hatchet-dev/hatchet/internal/services/shared/rpcstream"
 	"github.com/hatchet-dev/hatchet/internal/services/shared/timeout_lock"
 	"github.com/hatchet-dev/hatchet/pkg/operator"
+	"github.com/hatchet-dev/hatchet/pkg/repository"
 
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
 )
 
 type subscribedWorker struct {
+	deliveries repository.WorkerDeliveries
+	sessionID  uuid.UUID
 	// stream is any guarded server stream whose message type is AssignedAction, so operator services
 	// can register their own streams alongside the SDK Listen streams; nil for operator-backed workers
 	stream    *rpcstream.Sender[contracts.AssignedAction]

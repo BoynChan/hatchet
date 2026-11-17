@@ -18,6 +18,7 @@ class DispatcherStub:
 
     # The generated stub attaches per-RPC callables as attributes. We type them
     # as `Any` to avoid depending on grpc's (sync vs aio) callable generics here.
+    ClaimDelivery: Any
     Register: Any
     Listen: Any
     ListenV2: Any

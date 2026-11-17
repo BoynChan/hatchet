@@ -7,6 +7,9 @@ import "google/protobuf/timestamp.proto";
 service Dispatcher {
     rpc Register(WorkerRegisterRequest) returns (WorkerRegisterResponse) {}
 
+    // Authorize one consumer of a recoverable start before invoking user code.
+    rpc ClaimDelivery(ClaimDeliveryRequest) returns (ClaimDeliveryResponse) {}
+
     rpc Listen(WorkerListenRequest) returns (stream AssignedAction) {}
 
     // ListenV2 is like listen, but implementation does not include heartbeats. This should only used by SDKs
@@ -218,6 +221,10 @@ message AssignedAction {
 
     // (optional) inserted_at of the assigned task. The DAG operator uses this to prune durable log partitions.
     optional google.protobuf.Timestamp task_inserted_at = 29;
+
+    // Set only on replayable individual start messages.
+    string delivery_id = 30;
+    string listener_session_id = 31;
 }
 
 message BatchStartPayload {
@@ -226,9 +233,22 @@ message BatchStartPayload {
     int32 expectedSize = 3;
 }
 
+message ClaimDeliveryRequest {
+    string worker_id = 1;
+    string listener_session_id = 2;
+    string delivery_id = 3;
+    // Unique per received copy, reused when retrying the same claim RPC.
+    string receipt_id = 4;
+}
+
+message ClaimDeliveryResponse {
+    bool accepted = 1;
+}
+
 message WorkerListenRequest {
     // the id of the worker
     string worker_id = 1;
+    bool recover_deliveries = 2;
 }
 
 message WorkerUnsubscribeRequest {

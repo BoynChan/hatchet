@@ -51,6 +51,10 @@ func (worker *subscribedWorker) StartTaskFromBulk(
 	action.ActionType = contracts.ActionType_START_STEP_RUN
 	action.ActionPayload = string(inputBytes)
 
+	if worker.deliveries != nil && !task.IsDurable.Bool && action.BatchId == nil {
+		return worker.sendRecoverableStart(ctx, tenantId, task.V1Task, action)
+	}
+
 	err := worker.sendToWorker(ctx, action)
 
 	if err != nil {

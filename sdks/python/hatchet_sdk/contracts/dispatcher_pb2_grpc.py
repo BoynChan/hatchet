@@ -28,7 +28,7 @@ if _version_not_supported:
 class DispatcherStub(object):
     """Missing associated documentation comment in .proto file."""
 
-    def __init__(self, channel: grpc.Channel | grpc.aio.Channel) -> None:
+    def __init__(self, channel):
         """Constructor.
 
         Args:
@@ -38,6 +38,11 @@ class DispatcherStub(object):
                 '/Dispatcher/Register',
                 request_serializer=dispatcher__pb2.WorkerRegisterRequest.SerializeToString,
                 response_deserializer=dispatcher__pb2.WorkerRegisterResponse.FromString,
+                _registered_method=True)
+        self.ClaimDelivery = channel.unary_unary(
+                '/Dispatcher/ClaimDelivery',
+                request_serializer=dispatcher__pb2.ClaimDeliveryRequest.SerializeToString,
+                response_deserializer=dispatcher__pb2.ClaimDeliveryResponse.FromString,
                 _registered_method=True)
         self.Listen = channel.unary_stream(
                 '/Dispatcher/Listen',
@@ -121,6 +126,13 @@ class DispatcherServicer(object):
 
     def Register(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ClaimDelivery(self, request, context):
+        """Authorize one consumer of a recoverable start before invoking user code.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -231,6 +243,11 @@ def add_DispatcherServicer_to_server(servicer, server):
                     request_deserializer=dispatcher__pb2.WorkerRegisterRequest.FromString,
                     response_serializer=dispatcher__pb2.WorkerRegisterResponse.SerializeToString,
             ),
+            'ClaimDelivery': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClaimDelivery,
+                    request_deserializer=dispatcher__pb2.ClaimDeliveryRequest.FromString,
+                    response_serializer=dispatcher__pb2.ClaimDeliveryResponse.SerializeToString,
+            ),
             'Listen': grpc.unary_stream_rpc_method_handler(
                     servicer.Listen,
                     request_deserializer=dispatcher__pb2.WorkerListenRequest.FromString,
@@ -334,6 +351,33 @@ class Dispatcher(object):
             '/Dispatcher/Register',
             dispatcher__pb2.WorkerRegisterRequest.SerializeToString,
             dispatcher__pb2.WorkerRegisterResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ClaimDelivery(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/Dispatcher/ClaimDelivery',
+            dispatcher__pb2.ClaimDeliveryRequest.SerializeToString,
+            dispatcher__pb2.ClaimDeliveryResponse.FromString,
             options,
             channel_credentials,
             insecure,

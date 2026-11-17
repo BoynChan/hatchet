@@ -3,6 +3,7 @@ import json
 import time
 from collections.abc import AsyncGenerator
 from typing import cast
+from uuid import uuid4
 
 import grpc
 import grpc.aio
@@ -21,6 +22,7 @@ from hatchet_sdk.connection import new_conn
 from hatchet_sdk.contracts.dispatcher_pb2 import ActionType as ActionTypeProto
 from hatchet_sdk.contracts.dispatcher_pb2 import (
     AssignedAction,
+    ClaimDeliveryRequest,
     HeartbeatRequest,
     WorkerListenRequest,
     WorkerUnsubscribeRequest,
@@ -145,6 +147,33 @@ class ActionListener:
         loop = asyncio.get_event_loop()
 
         self.heartbeat_task = loop.create_task(self.heartbeat())
+
+    async def _claim_delivery(self, action: AssignedAction) -> bool:
+        # One nonce per received copy. If the reply gets lost, retry the same
+        # nonce so the engine can distinguish this caller from a duplicate.
+        request = ClaimDeliveryRequest(
+            worker_id=self.worker_id,
+            listener_session_id=action.listener_session_id,
+            delivery_id=action.delivery_id,
+            receipt_id=str(uuid4()),
+        )
+        while not self.stop_signal:
+            try:
+                response = await self.aio_client.ClaimDelivery(
+                    request, timeout=5, metadata=create_authorization_header(self.token)
+                )
+                return bool(response.accepted)
+            except grpc.RpcError as exc:  # noqa: PERF203
+                if exc.code() not in (
+                    grpc.StatusCode.UNAVAILABLE,
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    grpc.StatusCode.CANCELLED,
+                    grpc.StatusCode.INTERNAL,
+                    grpc.StatusCode.UNKNOWN,
+                ):
+                    raise
+                await asyncio.sleep(0.25)
+        return False
 
     def __aiter__(self) -> AsyncGenerator[Action | None, None]:
         return self._generator()
@@ -276,6 +305,10 @@ class ActionListener:
                         batch_start=batch_start_payload,
                     )
 
+                    if assigned_action.delivery_id and not await self._claim_delivery(
+                        assigned_action
+                    ):
+                        continue
                     yield action
             except grpc.RpcError as e:
                 self.last_heartbeat_succeeded = False
@@ -325,7 +358,7 @@ class ActionListener:
         self.aio_client = DispatcherStub(new_conn(self.config, True))
 
         listener = self.aio_client.ListenV2(
-            WorkerListenRequest(worker_id=self.worker_id),
+            WorkerListenRequest(worker_id=self.worker_id, recover_deliveries=True),
             timeout=self.config.listener_v2_timeout,
             metadata=create_authorization_header(self.token),
         )
