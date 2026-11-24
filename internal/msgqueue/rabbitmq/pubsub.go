@@ -427,13 +427,20 @@ func isFanout(topic msgqueue.Topic) bool {
 	return topic.Kind() == msgqueue.TopicKindTenantStream || topic.Kind() == msgqueue.TopicKindStreamWake
 }
 
+// subQueueDeclareArgs builds the AMQP arguments for PubSub subscriber queues.
+// PubSub queues are always non-durable (durable=false, autoDelete=true,
+// exclusive=true), so x-consumer-timeout must be omitted: RabbitMQ 4.3+
+// rejects it on non-durable classic queues with 406 PRECONDITION_FAILED.
+func subQueueDeclareArgs() amqp.Table {
+	return make(amqp.Table)
+}
+
 // declareSubQueue declares the consumer queue for a topic and returns its
 // name. Fanout topics get a random-suffix exclusive queue bound to their
 // fanout exchange; scheduler topics consume the well-known partition queue on
 // the default exchange.
 func (p *PubSub) declareSubQueue(ch *amqp.Channel, topic msgqueue.Topic) (string, error) {
-	args := make(amqp.Table)
-	args["x-consumer-timeout"] = consumerTimeout.Milliseconds()
+	args := subQueueDeclareArgs()
 
 	name := topic.Name()
 
