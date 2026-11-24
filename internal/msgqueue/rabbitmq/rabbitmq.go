@@ -512,21 +512,42 @@ func (t *MessageQueueImpl) Subscribe(
 	}, nil
 }
 
+// queueDeclareArgs builds the AMQP arguments for declaring q. RabbitMQ 4.3+
+// rejects x-consumer-timeout on non-durable, exclusive, or auto-deleted classic
+// queues with 406 PRECONDITION_FAILED, so only set it for durable shared queues.
+func queueDeclareArgs(q msgqueue.Queue) amqp.Table {
+	args := make(amqp.Table)
+	if q.Durable() && !q.Exclusive() && !q.AutoDeleted() {
+		args["x-consumer-timeout"] = consumerTimeout.Milliseconds()
+	}
+
+	if !q.IsDLQ() && q.DLQ() != nil && q.DLQ().IsAutoDLQ() {
+		args["x-dead-letter-exchange"] = ""
+		args["x-dead-letter-routing-key"] = getTmpDLQName(q.DLQ().Name())
+	} else if !q.IsDLQ() && q.DLQ() != nil && !q.DLQ().IsAutoDLQ() {
+		args["x-dead-letter-exchange"] = ""
+		args["x-dead-letter-routing-key"] = q.DLQ().Name()
+	}
+
+	if q.IsExpirable() {
+		args["x-message-ttl"] = int32(20000) // 20 seconds
+		args["x-expires"] = int32(600000)    // 10 minutes
+	}
+
+	return args
+}
+
 func (t *MessageQueueImpl) initQueue(ch *amqp.Channel, q msgqueue.Queue) (string, error) {
 	if q.IsDLQ() {
 		return q.Name(), nil
 	}
 
-	args := make(amqp.Table)
-	args["x-consumer-timeout"] = consumerTimeout.Milliseconds()
+	args := queueDeclareArgs(q)
 	name := q.Name()
 
 	if !q.IsDLQ() && q.DLQ() != nil && q.DLQ().IsAutoDLQ() {
 		dlx1 := getTmpDLQName(q.DLQ().Name())
 		dlx2 := getProcDLQName(q.DLQ().Name())
-
-		args["x-dead-letter-exchange"] = ""
-		args["x-dead-letter-routing-key"] = dlx1
 
 		dlq1Args := make(amqp.Table)
 
@@ -549,16 +570,6 @@ func (t *MessageQueueImpl) initQueue(ch *amqp.Channel, q msgqueue.Queue) (string
 			t.l.Error().Msgf("cannot declare dead letter exchange/queue: %s, %s", dlx2, err.Error())
 			return "", err
 		}
-	}
-
-	if !q.IsDLQ() && q.DLQ() != nil && !q.DLQ().IsAutoDLQ() {
-		args["x-dead-letter-exchange"] = ""
-		args["x-dead-letter-routing-key"] = q.DLQ().Name()
-	}
-
-	if q.IsExpirable() {
-		args["x-message-ttl"] = int32(20000) // 20 seconds
-		args["x-expires"] = int32(600000)    // 10 minutes
 	}
 
 	if _, err := ch.QueueDeclare(name, q.Durable(), q.AutoDeleted(), q.Exclusive(), false, args); err != nil {
