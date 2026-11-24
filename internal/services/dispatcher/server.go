@@ -1548,6 +1548,18 @@ func (s *DispatcherImpl) handleTaskStarted(inputCtx context.Context, task *sqlcv
 	tenant := inputCtx.Value("tenant").(*sqlcv1.Tenant)
 	tenantId := tenant.ID
 
+	ackedMsg, err := tasktypes.AckedTaskMessage(tenantId, task.ID, task.InsertedAt, retryCount)
+
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.pubBuffer.Pub(inputCtx, msgqueue.TASK_PROCESSING_QUEUE, ackedMsg, false)
+
+	if err != nil {
+		return nil, fmt.Errorf("could not publish acked message for task %d: %w", task.ID, err)
+	}
+
 	msg, err := tasktypes.MonitoringEventMessageFromActionEvent(
 		tenantId,
 		task.ID,
@@ -1779,13 +1791,19 @@ func (s *DispatcherImpl) handleBatchTaskStarted(
 	idInsertedAts := make([]v1.IdInsertedAt, 0, len(tasks))
 
 	for _, task := range tasks {
+		if !task.IsDurable.Valid || !task.IsDurable.Bool {
+			continue
+		}
+
 		idInsertedAts = append(idInsertedAts, v1.IdInsertedAt{ID: task.ID, InsertedAtUnixMicros: task.InsertedAt.Time.UnixMicro()})
 	}
 
-	durableInvocationCounts, err := s.repov1.DurableEvents().GetDurableTaskInvocationCounts(inputCtx, tenantId, idInsertedAts)
+	var durableInvocationCounts map[v1.IdInsertedAt]*int32
 
-	if err != nil {
-		durableInvocationCounts = nil
+	if len(idInsertedAts) > 0 {
+		durableInvocationCounts, _ = s.repov1.DurableEvents().GetDurableTaskInvocationCounts(inputCtx, tenantId, idInsertedAts)
+
+		// intentionally swallow the error and continue
 	}
 
 	var workerId *uuid.UUID
@@ -1795,6 +1813,7 @@ func (s *DispatcherImpl) handleBatchTaskStarted(
 	}
 
 	payloads := make([]tasktypes.CreateMonitoringEventPayload, 0, len(tasks))
+	ackedTasks := make([]v1.TaskIdInsertedAtRetryCount, 0, len(tasks))
 
 	for _, task := range tasks {
 		item, ok := itemsByExternalId[task.ExternalID]
@@ -1815,6 +1834,12 @@ func (s *DispatcherImpl) handleBatchTaskStarted(
 			durableInvocationCount = *count
 		}
 
+		ackedTasks = append(ackedTasks, v1.TaskIdInsertedAtRetryCount{
+			Id:         task.ID,
+			InsertedAt: task.InsertedAt,
+			RetryCount: retryCount,
+		})
+
 		payloads = append(payloads, tasktypes.CreateMonitoringEventPayload{
 			TaskId:                 task.ID,
 			RetryCount:             retryCount,
@@ -1828,6 +1853,22 @@ func (s *DispatcherImpl) handleBatchTaskStarted(
 
 	if len(payloads) == 0 {
 		return resp, nil
+	}
+
+	ackedMsg, err := msgqueue.NewTenantMessage(
+		tenantId,
+		msgqueue.MsgIDTaskAcked,
+		false,
+		true,
+		ackedTasks...,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.pubBuffer.Pub(inputCtx, msgqueue.TASK_PROCESSING_QUEUE, ackedMsg, false); err != nil {
+		return nil, fmt.Errorf("could not publish acked message for batch tasks: %w", err)
 	}
 
 	msg, err := msgqueue.NewTenantMessage(
@@ -1869,13 +1910,19 @@ func (s *DispatcherImpl) handleBatchTaskCompleted(
 	idInsertedAts := make([]v1.IdInsertedAt, 0, len(tasks))
 
 	for _, task := range tasks {
+		if !task.IsDurable.Valid || !task.IsDurable.Bool {
+			continue
+		}
+
 		idInsertedAts = append(idInsertedAts, v1.IdInsertedAt{ID: task.ID, InsertedAtUnixMicros: task.InsertedAt.Time.UnixMicro()})
 	}
 
-	durableInvocationCounts, err := s.repov1.DurableEvents().GetDurableTaskInvocationCounts(inputCtx, tenantId, idInsertedAts)
+	var durableInvocationCounts map[v1.IdInsertedAt]*int32
 
-	if err != nil {
-		durableInvocationCounts = nil
+	if len(idInsertedAts) > 0 {
+		durableInvocationCounts, _ = s.repov1.DurableEvents().GetDurableTaskInvocationCounts(inputCtx, tenantId, idInsertedAts)
+
+		// intentionally swallow the error and continue
 	}
 
 	var workerId *uuid.UUID
