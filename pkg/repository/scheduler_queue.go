@@ -406,6 +406,7 @@ func (d *sharedRepository) markQueueItemsProcessed(ctx context.Context, tenantId
 			Removeretrycounts:     removeRetryCounts,
 			Tenantid:              tenantId,
 			Mintaskinsertedat:     minTaskInsertedAt,
+			Reassignunackedtasks:  d.reassignUnackedTasks,
 		})
 
 		flushDuration = time.Since(flushStart)
@@ -1206,12 +1207,13 @@ func (b *batchQueueRepository) commitAssignmentsTx(ctx context.Context, tx pgx.T
 	}
 
 	updated, err := b.queries.UpdateTasksToAssigned(ctx, tx, sqlcv1.UpdateTasksToAssignedParams{
-		Taskids:           taskIds,
-		Taskinsertedats:   taskInsertedAts,
-		Taskretrycounts:   taskRetryCounts,
-		Workerids:         workerIds,
-		Mintaskinsertedat: minTaskInsertedAt,
-		Tenantid:          b.tenantId,
+		Taskids:              taskIds,
+		Taskinsertedats:      taskInsertedAts,
+		Taskretrycounts:      taskRetryCounts,
+		Workerids:            workerIds,
+		Mintaskinsertedat:    minTaskInsertedAt,
+		Tenantid:             b.tenantId,
+		Reassignunackedtasks: b.reassignUnackedTasks,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("could not update tasks to assigned: %w", err)
@@ -1273,14 +1275,15 @@ func (b *batchQueueRepository) applyBatchMetadataTx(ctx context.Context, tx pgx.
 		}
 
 		if err := b.queries.UpdateTaskBatchMetadata(ctx, tx, sqlcv1.UpdateTaskBatchMetadataParams{
-			Batchid:         uuid.MustParse(batchID),
-			Batchsize:       int32(len(group)), // nolint: gosec
-			Workerid:        group[0].WorkerID,
-			Batchkey:        group[0].BatchKey,
-			Tenantid:        b.tenantId,
-			Taskids:         taskIds,
-			Taskinsertedats: taskInsertedAts,
-			Batchindexes:    batchIndexes,
+			Batchid:              uuid.MustParse(batchID),
+			Batchsize:            int32(len(group)), // nolint: gosec
+			Workerid:             group[0].WorkerID,
+			Batchkey:             group[0].BatchKey,
+			Tenantid:             b.tenantId,
+			Taskids:              taskIds,
+			Taskinsertedats:      taskInsertedAts,
+			Batchindexes:         batchIndexes,
+			Reassignunackedtasks: b.reassignUnackedTasks,
 		}); err != nil {
 			return fmt.Errorf("could not update task batch metadata: %w", err)
 		}

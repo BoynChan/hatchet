@@ -492,6 +492,8 @@ func (tc *TasksControllerImpl) handleBufferedMsgs(tenantId uuid.UUID, msgId stri
 	ctx := context.WithValue(context.Background(), analytics.TenantIDKey, tenantId)
 
 	switch msgId {
+	case msgqueue.MsgIDTaskAcked:
+		return tc.handleTaskAcked(ctx, tenantId, payloads)
 	case msgqueue.MsgIDTaskCompleted:
 		return tc.handleTaskCompleted(ctx, tenantId, payloads)
 	case msgqueue.MsgIDTaskFailed:
@@ -679,6 +681,30 @@ func (tc *TasksControllerImpl) publishChildCancellations(
 
 		return nil
 	})
+}
+
+func (tc *TasksControllerImpl) handleTaskAcked(ctx context.Context, tenantId uuid.UUID, payloads [][]byte) error {
+	ctx, span := telemetry.NewSpan(ctx, "TasksControllerImpl.handleTaskAcked")
+	defer span.End()
+
+	telemetry.WithAttributes(span, telemetry.AttributeKV{Key: "tenant.id", Value: tenantId})
+
+	msgs := msgqueue.JSONConvert[v1.TaskIdInsertedAtRetryCount](payloads)
+	ackedTasks := make([]v1.TaskIdInsertedAtRetryCount, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg != nil {
+			ackedTasks = append(ackedTasks, *msg)
+		}
+	}
+
+	if err := tc.repov1.Tasks().MarkTaskRuntimesAcked(ctx, tenantId, ackedTasks); err != nil {
+		err = fmt.Errorf("could not mark tasks as acked: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "could not mark tasks as acked")
+		return err
+	}
+
+	return nil
 }
 
 func (tc *TasksControllerImpl) handleTaskCompleted(ctx context.Context, tenantId uuid.UUID, payloads [][]byte) error {
