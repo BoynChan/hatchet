@@ -19,10 +19,12 @@ import (
 	telemetry_codes "go.opentelemetry.io/otel/codes"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/hatchet-dev/hatchet/internal/enumerables"
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
 	"github.com/hatchet-dev/hatchet/internal/services/dispatcher/contracts"
 	"github.com/hatchet-dev/hatchet/internal/services/shared/rpcstream"
 	"github.com/hatchet-dev/hatchet/pkg/analytics"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	"github.com/hatchet-dev/hatchet/pkg/logger"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
@@ -97,7 +99,7 @@ func (s *DispatcherImpl) Register(ctx context.Context, request *contracts.Worker
 	workerId := worker.ID.String()
 
 	if request.Labels != nil {
-		_, err = s.upsertLabels(ctx, worker.ID, request.Labels)
+		_, err = s.upsertLabels(ctx, tenantId, worker.ID, request.Labels)
 
 		if err != nil {
 			return nil, err
@@ -143,7 +145,7 @@ func (s *DispatcherImpl) UpsertWorkerLabels(ctx context.Context, request *contra
 		return nil, err
 	}
 
-	_, err = s.upsertLabels(ctx, workerId, request.Labels)
+	_, err = s.upsertLabels(ctx, tenant.ID, workerId, request.Labels)
 
 	if err != nil {
 		return nil, err
@@ -155,7 +157,7 @@ func (s *DispatcherImpl) UpsertWorkerLabels(ctx context.Context, request *contra
 	}, nil
 }
 
-func (s *DispatcherImpl) upsertLabels(ctx context.Context, workerId uuid.UUID, request map[string]*contracts.WorkerLabels) ([]*sqlcv1.WorkerLabel, error) {
+func (s *DispatcherImpl) upsertLabels(ctx context.Context, tenantId uuid.UUID, workerId uuid.UUID, request map[string]*contracts.WorkerLabels) ([]*sqlcv1.WorkerLabel, error) {
 	affinities := make([]v1.UpsertWorkerLabelOpts, 0, len(request))
 
 	for key, config := range request {
@@ -173,7 +175,7 @@ func (s *DispatcherImpl) upsertLabels(ctx context.Context, workerId uuid.UUID, r
 		})
 	}
 
-	res, err := s.repov1.Workers().UpsertWorkerLabels(ctx, workerId, affinities)
+	res, err := s.repov1.Workers().UpsertWorkerLabels(ctx, tenantId, workerId, affinities)
 
 	if err != nil {
 		s.l.Error().Ctx(ctx).Err(err).Msgf("could not upsert worker affinities for worker %s", workerId.String())
@@ -226,6 +228,8 @@ func (s *DispatcherImpl) Listen(ctx context.Context, request *contracts.WorkerLi
 			s.l.Error().Ctx(ctx).Err(err).Msgf("could not update worker %s dispatcher", request.WorkerId)
 			return err
 		}
+
+		s.NotifyWorkerDispatcherChanged(ctx, tenant, workerId)
 	}
 
 	// Activation records this session's id on the worker; deactivation below only succeeds
@@ -352,6 +356,8 @@ func (s *DispatcherImpl) ListenV2(ctx context.Context, request *contracts.Worker
 			s.l.Error().Ctx(ctx).Err(err).Msgf("could not update worker %s dispatcher", request.WorkerId)
 			return err
 		}
+
+		s.NotifyWorkerDispatcherChanged(ctx, tenant, workerId)
 	}
 
 	// Activation records this session's id on the worker; deactivation below only succeeds
@@ -556,8 +562,7 @@ func (w *workflowRunAcks) hasWorkflowRun(id uuid.UUID) bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	_, ok := w.acks[id]
-	return ok
+	return enumerables.HasKey(w.acks, id)
 }
 
 func (d *DispatcherImpl) cleanResults(results []*contracts.StepRunResult) []*contracts.StepRunResult {
@@ -620,7 +625,7 @@ func (s *DispatcherImpl) SubscribeToWorkflowRuns(ctx context.Context, connectStr
 	defer stream.Close()
 
 	s.analytics.Count(ctx, analytics.WorkflowRun, analytics.Subscribe)
-	return s.subscribeToWorkflowRunsV1(ctx, connectStream, stream)
+	return s.subscribeToWorkflowRunsV1(ctx, connectStream.Receive, stream)
 }
 
 func waitFor(wg *sync.WaitGroup, timeout time.Duration, l *zerolog.Logger) {
@@ -1136,10 +1141,13 @@ func (b *StreamEventBuffer) sendReadyEvents(stepRunId uuid.UUID) {
 	b.stepRunIdToExpectedIndex[stepRunId] = expectedIdx
 }
 
-// SubscribeToWorkflowEvents registers workflow events with the dispatcher
+// subscribeToWorkflowRunsV1 runs a SubscribeToWorkflowRuns session over the two halves of the
+// stream: receive yields the client's subscriptions (io.EOF or a Canceled code when the client
+// is done), sender takes the run events. It is shared by the gRPC handler and the channel-backed
+// RegisterRunStream.
 func (s *DispatcherImpl) subscribeToWorkflowRunsV1(
 	ctx context.Context,
-	receiver *connect.BidiStream[contracts.SubscribeToWorkflowRunsRequest, contracts.WorkflowRunEvent],
+	receive func() (*contracts.SubscribeToWorkflowRunsRequest, error),
 	sender *rpcstream.Sender[contracts.WorkflowRunEvent],
 ) error {
 	tenant := ctx.Value("tenant").(*sqlcv1.Tenant)
@@ -1292,7 +1300,7 @@ func (s *DispatcherImpl) subscribeToWorkflowRunsV1(
 	// start a new goroutine to handle client-side streaming
 	go func() {
 		for {
-			req, err := receiver.Receive()
+			req, err := receive()
 
 			if err != nil {
 				cancel()
@@ -1376,6 +1384,8 @@ func (s *DispatcherImpl) taskEventsToWorkflowRunEvent(ctx context.Context, tenan
 				JobRunId:          event.TaskExternalId.String(),
 				Error:             &event.ErrorMessage,
 			}
+		case sqlcv1.V1TaskEventTypeSIGNALCREATED, sqlcv1.V1TaskEventTypeSIGNALCOMPLETED:
+			return nil
 		}
 		return nil
 	}
@@ -1448,7 +1458,7 @@ func (s *DispatcherImpl) sendStepActionEventV1(ctx context.Context, request *con
 	task, err := s.repov1.Tasks().GetTaskByExternalId(ctx, tenant.ID, taskExternalId, skipCache)
 
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid task external run id %s: %v", request.TaskRunExternalId, err))
+		return nil, fmt.Errorf("failed to get task %s: %w", request.TaskRunExternalId, err)
 	}
 
 	retryCount := task.RetryCount
@@ -1501,6 +1511,7 @@ func (s *DispatcherImpl) sendStepActionEventV1(ctx context.Context, request *con
 		return s.handleTaskFailed(ctx, task, retryCount, durableInvCount, request)
 	case contracts.StepActionEventType_STEP_EVENT_TYPE_CANCELLED:
 		return s.handleTaskCancelledEvent(ctx, task, retryCount, request)
+	case contracts.StepActionEventType_STEP_EVENT_TYPE_UNKNOWN:
 	}
 
 	return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid task external run id %s", request.TaskRunExternalId))
@@ -1566,6 +1577,7 @@ func (s *DispatcherImpl) handleTaskStarted(inputCtx context.Context, task *sqlcv
 		retryCount,
 		durableInvocationCount,
 		request,
+		nil,
 	)
 
 	if err != nil {
@@ -1584,6 +1596,19 @@ func (s *DispatcherImpl) handleTaskStarted(inputCtx context.Context, task *sqlcv
 	}, nil
 }
 
+// newOutputPayloadReferenceId returns the id the task controller stores a completion's payload under
+// and the OLAP event points at. It is nil while OLAP still keeps its own copy of every task output,
+// and for an empty output, which the payload store never stores and so could never be found by reference.
+func (s *DispatcherImpl) newOutputPayloadReferenceId(output string) *uuid.UUID {
+	if !s.repov1.Payloads().PayloadConsolidationEnabled() || v1.NewPayload[v1.TaskOutputShape]([]byte(output)).IsEmpty() {
+		return nil
+	}
+
+	referenceId := v1.NewPayloadReferenceId()
+
+	return &referenceId
+}
+
 func (s *DispatcherImpl) handleTaskCompleted(inputCtx context.Context, task *sqlcv1.FlattenExternalIdsRow, retryCount int32, durableInvocationCount int32, request *contracts.StepActionEvent) (*contracts.ActionEventResponse, error) {
 	ctx := inputCtx
 	tenant := inputCtx.Value("tenant").(*sqlcv1.Tenant)
@@ -1592,6 +1617,8 @@ func (s *DispatcherImpl) handleTaskCompleted(inputCtx context.Context, task *sql
 	// if request.RetryCount == nil {
 	// 	return nil, fmt.Errorf("retry count is required in v2")
 	// }
+
+	outputPayloadReferenceId := s.newOutputPayloadReferenceId(request.EventPayload)
 
 	msg, err := tasktypes.CompletedTaskMessage(
 		tenantId,
@@ -1602,6 +1629,7 @@ func (s *DispatcherImpl) handleTaskCompleted(inputCtx context.Context, task *sql
 		retryCount,
 		[]byte(request.EventPayload),
 		request.WorkerId,
+		outputPayloadReferenceId,
 	)
 
 	if err != nil {
@@ -1625,6 +1653,7 @@ func (s *DispatcherImpl) handleTaskCompleted(inputCtx context.Context, task *sql
 		retryCount,
 		durableInvocationCount,
 		request,
+		outputPayloadReferenceId,
 	)
 
 	if err != nil {
@@ -1692,7 +1721,7 @@ func (d *DispatcherImpl) CancelTaskWithReason(ctx context.Context, tenantId uuid
 
 	task, err := d.repov1.Tasks().GetTaskByExternalId(ctx, tenantId, taskExternalId, false)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("could not get task %s: %v", request.TaskRunExternalId, err))
+		return nil, fmt.Errorf("could not get task %s: %w", request.TaskRunExternalId, err)
 	}
 
 	retryCount := task.RetryCount
@@ -1707,7 +1736,7 @@ func (d *DispatcherImpl) CancelTaskWithReason(ctx context.Context, tenantId uuid
 		task.ExternalID,
 		task.WorkflowRunID,
 		retryCount,
-		sqlcv1.V1EventTypeOlapCANCELLED,
+		enums.V1EventTypeOlapCANCELLED,
 		request.EventPayload,
 		false,
 	)
@@ -1771,6 +1800,7 @@ func (s *DispatcherImpl) sendBatchActionEventV1(ctx context.Context, request *co
 		return s.handleBatchTaskFailed(ctx, tenantId, tasks, itemsByExternalId, request)
 	case contracts.StepActionEventType_STEP_EVENT_TYPE_CANCELLED:
 		return s.handleBatchTaskCancelled(ctx, tenantId, tasks, request)
+	case contracts.StepActionEventType_STEP_EVENT_TYPE_UNKNOWN, contracts.StepActionEventType_STEP_EVENT_TYPE_ACKNOWLEDGED:
 	}
 
 	return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid batch action event type %s", request.EventType))
@@ -1845,7 +1875,7 @@ func (s *DispatcherImpl) handleBatchTaskStarted(
 			RetryCount:             retryCount,
 			DurableInvocationCount: durableInvocationCount,
 			WorkerId:               workerId,
-			EventType:              sqlcv1.V1EventTypeOlapSTARTED,
+			EventType:              enums.V1EventTypeOlapSTARTED,
 			EventTimestamp:         request.EventTimestamp.AsTime(),
 			EventPayload:           item.EventPayload,
 		})
@@ -1949,11 +1979,13 @@ func (s *DispatcherImpl) handleBatchTaskCompleted(
 		}
 
 		eventPayload := item.EventPayload
-		olapEventType := sqlcv1.V1EventTypeOlapFINISHED
+		olapEventType := enums.V1EventTypeOlapFINISHED
+
+		var outputPayloadReferenceId *uuid.UUID
 
 		if validationErr := v1.ValidateJSONB([]byte(eventPayload), "taskOutput"); validationErr != nil {
 			eventPayload = validationErr.Error()
-			olapEventType = sqlcv1.V1EventTypeOlapFAILED
+			olapEventType = enums.V1EventTypeOlapFAILED
 
 			failedPayloads = append(failedPayloads, tasktypes.FailedTaskPayload{
 				TaskId:        task.ID,
@@ -1965,14 +1997,21 @@ func (s *DispatcherImpl) handleBatchTaskCompleted(
 				ErrorMsg:      eventPayload,
 			})
 		} else {
+			outputPayloadReferenceId = s.newOutputPayloadReferenceId(item.EventPayload)
+
+			if outputPayloadReferenceId != nil {
+				eventPayload = ""
+			}
+
 			completedPayloads = append(completedPayloads, tasktypes.CompletedTaskPayload{
-				TaskId:        task.ID,
-				InsertedAt:    task.InsertedAt,
-				ExternalId:    task.ExternalID,
-				WorkflowRunId: task.WorkflowRunID,
-				RetryCount:    retryCount,
-				Output:        []byte(item.EventPayload),
-				WorkerId:      request.WorkerId,
+				TaskId:             task.ID,
+				InsertedAt:         task.InsertedAt,
+				ExternalId:         task.ExternalID,
+				WorkflowRunId:      task.WorkflowRunID,
+				RetryCount:         retryCount,
+				Output:             []byte(item.EventPayload),
+				WorkerId:           request.WorkerId,
+				PayloadReferenceId: outputPayloadReferenceId,
 			})
 		}
 
@@ -1990,6 +2029,7 @@ func (s *DispatcherImpl) handleBatchTaskCompleted(
 			EventType:              olapEventType,
 			EventTimestamp:         request.EventTimestamp.AsTime(),
 			EventPayload:           eventPayload,
+			PayloadReferenceId:     outputPayloadReferenceId,
 		})
 	}
 
@@ -2263,7 +2303,7 @@ func (d *DispatcherImpl) flushRefreshTimeout(ctx context.Context, key refreshTim
 				RetryCount:     taskRuntime.RetryCount,
 				WorkerId:       taskRuntime.WorkerID,
 				EventTimestamp: time.Now(),
-				EventType:      sqlcv1.V1EventTypeOlapTIMEOUTREFRESHED,
+				EventType:      enums.V1EventTypeOlapTIMEOUTREFRESHED,
 				EventMessage:   fmt.Sprintf("Timeout refreshed by %s", sum.String()),
 			},
 		)
@@ -2311,7 +2351,7 @@ func (d *DispatcherImpl) releaseSlot(ctx context.Context, tenant *sqlcv1.Tenant,
 			RetryCount:     releasedSlot.RetryCount,
 			WorkerId:       workerId,
 			EventTimestamp: time.Now(),
-			EventType:      sqlcv1.V1EventTypeOlapSLOTRELEASED,
+			EventType:      enums.V1EventTypeOlapSLOTRELEASED,
 		},
 	)
 
@@ -2619,11 +2659,9 @@ func (s *DispatcherImpl) subscribeToWorkflowEventsByAdditionalMetaV1(ctx context
 					return nil, err
 				}
 
-				workflowRunIdsToRow := make(map[uuid.UUID]*listWorkflowRunsResult)
-
-				for _, wr := range workflowRuns {
-					workflowRunIdsToRow[wr.WorkflowRunId] = wr
-				}
+				workflowRunIdsToRow := enumerables.KeyBy(workflowRuns, func(wr *listWorkflowRunsResult) uuid.UUID {
+					return wr.WorkflowRunId
+				})
 
 				res := make([]*contracts.WorkflowEvent, 0)
 

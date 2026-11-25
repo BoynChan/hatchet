@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/hatchet-dev/hatchet/internal/datautils"
+	"github.com/hatchet-dev/hatchet/internal/gocronutils"
 	"github.com/hatchet-dev/hatchet/internal/integrations/alerting"
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
 	"github.com/hatchet-dev/hatchet/internal/syncx"
@@ -23,8 +24,9 @@ type Ticker interface {
 }
 
 type TickerImpl struct {
-	mqv1 msgqueue.MessageQueue
-	l    *zerolog.Logger
+	mqv1   msgqueue.MessageQueue
+	pubsub msgqueue.PubSub
+	l      *zerolog.Logger
 
 	repov1 v1.Repository
 	s      gocron.Scheduler
@@ -49,8 +51,9 @@ type TickerImpl struct {
 type TickerOpt func(*TickerOpts)
 
 type TickerOpts struct {
-	mqv1 msgqueue.MessageQueue
-	l    *zerolog.Logger
+	mqv1   msgqueue.MessageQueue
+	pubsub msgqueue.PubSub
+	l      *zerolog.Logger
 
 	repov1   v1.Repository
 	tickerId uuid.UUID
@@ -71,6 +74,13 @@ func defaultTickerOpts() *TickerOpts {
 func WithMessageQueueV1(mq msgqueue.MessageQueue) TickerOpt {
 	return func(opts *TickerOpts) {
 		opts.mqv1 = mq
+	}
+}
+
+// WithPubSub supplies the pubsub the ticker receives cron refresh notifications on.
+func WithPubSub(pubsub msgqueue.PubSub) TickerOpt {
+	return func(opts *TickerOpts) {
+		opts.pubsub = pubsub
 	}
 }
 
@@ -103,6 +113,10 @@ func New(fs ...TickerOpt) (*TickerImpl, error) {
 		return nil, fmt.Errorf("task queue v1 is required. use WithMessageQueueV1")
 	}
 
+	if opts.pubsub == nil {
+		return nil, fmt.Errorf("pubsub is required. use WithPubSub")
+	}
+
 	if opts.repov1 == nil {
 		return nil, fmt.Errorf("repository v1 is required. use WithRepositoryV1")
 	}
@@ -128,6 +142,7 @@ func New(fs ...TickerOpt) (*TickerImpl, error) {
 
 	return &TickerImpl{
 		mqv1:                   opts.mqv1,
+		pubsub:                 opts.pubsub,
 		l:                      opts.l,
 		repov1:                 opts.repov1,
 		s:                      s,
@@ -157,18 +172,20 @@ func (t *TickerImpl) Start() (func() error, error) {
 	// a cron to be created
 	t.refreshCronSchedules(ctx)()
 
-	// add a handler to update the cron schedule on-demand when crons are created
+	// add a handler to update the cron schedule on-demand when crons change
 	cronUpdateHandler := func(task *msgqueue.Message) error {
 		t.refreshCronSchedules(ctx)()
 		return nil
 	}
-	queueCleanupFunc, err := t.mqv1.Subscribe(msgqueue.TICKER_UPDATE_QUEUE, cronUpdateHandler, msgqueue.NoOpHook)
+	cleanupCronRefresh, err := t.pubsub.Sub(msgqueue.CronRefreshTopic(), cronUpdateHandler)
 	if err != nil {
-		t.l.Err(err).Ctx(ctx).Msg("Could not subscribe to cron trigger update queue")
+		cancel()
+		return nil, fmt.Errorf("could not subscribe to cron refresh topic: %w", err)
 	}
 
-	_, err = t.s.NewJob(
-		gocron.DurationJob(time.Second*5),
+	_, err = gocronutils.NewJitteredDurationJob(
+		t.s,
+		time.Second*5,
 		gocron.NewTask(
 			t.runUpdateHeartbeat(ctx),
 		),
@@ -179,9 +196,10 @@ func (t *TickerImpl) Start() (func() error, error) {
 		return nil, fmt.Errorf("could not create update heartbeat job: %w", err)
 	}
 
-	_, err = t.s.NewJob(
+	_, err = gocronutils.NewJitteredDurationJob(
+		t.s,
 		// crons only have a resolution of 1 minute, so only poll every 15 seconds
-		gocron.DurationJob(time.Second*15),
+		time.Second*15,
 		gocron.NewTask(
 			t.refreshCronSchedules(ctx),
 		),
@@ -193,11 +211,12 @@ func (t *TickerImpl) Start() (func() error, error) {
 		return nil, fmt.Errorf("could not create poll cron schedules job: %w", err)
 	}
 
-	_, err = t.s.NewJob(
+	_, err = gocronutils.NewJitteredDurationJob(
+		t.s,
 		// we look ahead every 5 seconds
 		// FIXME: add another queue similar to cron jobs so that tasks scheduled less than 5 seconds
 		// into the future do not take 5 seconds to be triggered
-		gocron.DurationJob(time.Second*5),
+		time.Second*5,
 		gocron.NewTask(
 			t.runPollSchedules(ctx),
 		),
@@ -209,9 +228,26 @@ func (t *TickerImpl) Start() (func() error, error) {
 		return nil, fmt.Errorf("could not create poll cron schedules job: %w", err)
 	}
 
+	_, err = gocronutils.NewJitteredDurationJob(
+		t.s,
+		// counts are read as count rows plus deltas, so this interval only bounds how many
+		// deltas a read has to sum
+		time.Second*5,
+		gocron.NewTask(
+			t.runCompactAllocatedResourceCounts(ctx),
+		),
+		gocron.WithSingletonMode(gocron.LimitModeReschedule),
+	)
+
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("could not create compact allocated resource counts job: %w", err)
+	}
+
 	// poll for expiring tokens every 15 minutes
-	_, err = t.s.NewJob(
-		gocron.DurationJob(time.Minute*15),
+	_, err = gocronutils.NewJitteredDurationJob(
+		t.s,
+		time.Minute*15,
 		gocron.NewTask(
 			t.runExpiringTokenAlerts(ctx),
 		),
@@ -223,8 +259,9 @@ func (t *TickerImpl) Start() (func() error, error) {
 	}
 
 	// poll for tenant resource limit alerts every 15 minutes
-	_, err = t.s.NewJob(
-		gocron.DurationJob(time.Minute*15),
+	_, err = gocronutils.NewJitteredDurationJob(
+		t.s,
+		time.Minute*15,
 		gocron.NewTask(
 			t.runTenantResourceLimitAlerts(ctx),
 		),
@@ -243,8 +280,8 @@ func (t *TickerImpl) Start() (func() error, error) {
 
 		cancel()
 
-		if err = queueCleanupFunc(); err != nil {
-			t.l.Err(err).Ctx(ctx).Msg("Could not cleanup cron trigger update queue")
+		if err = cleanupCronRefresh(); err != nil {
+			t.l.Err(err).Ctx(ctx).Msg("Could not cleanup cron refresh subscription")
 		}
 
 		if err := t.s.Shutdown(); err != nil {
@@ -270,6 +307,14 @@ func (t *TickerImpl) Start() (func() error, error) {
 	}
 
 	return cleanup, nil
+}
+
+func (t *TickerImpl) runCompactAllocatedResourceCounts(ctx context.Context) func() {
+	return func() {
+		if err := t.repov1.WorkflowSchedules().CompactAllocatedResourceCounts(ctx); err != nil && ctx.Err() == nil {
+			t.l.Err(err).Ctx(ctx).Msg("could not compact allocated resource counts")
+		}
+	}
 }
 
 func (t *TickerImpl) runUpdateHeartbeat(ctx context.Context) func() {

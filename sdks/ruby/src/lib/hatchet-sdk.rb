@@ -22,6 +22,7 @@ module Hatchet
   require_relative "hatchet/features/rate_limits"
   require_relative "hatchet/features/cron"
   require_relative "hatchet/features/scheduled"
+  require_relative "hatchet/features/streams"
 
   require_relative "hatchet/exceptions"
   require_relative "hatchet/engine_version"
@@ -58,7 +59,10 @@ module Hatchet
   require_relative "hatchet/contracts/v1/dispatcher_services_pb"
   require_relative "hatchet/contracts/v1/workflows_pb"
   require_relative "hatchet/contracts/v1/workflows_services_pb"
+  require_relative "hatchet/contracts/v1/streams_pb"
+  require_relative "hatchet/contracts/v1/streams_services_pb"
 
+  require_relative "hatchet/clients/grpc/server_retry_delay"
   require_relative "hatchet/clients/grpc/dispatcher"
   require_relative "hatchet/clients/grpc/admin"
   require_relative "hatchet/clients/grpc/event_client"
@@ -67,6 +71,7 @@ module Hatchet
   require_relative "hatchet/worker/workflow_run_listener"
   require_relative "hatchet/worker/durable_eviction/cache"
   require_relative "hatchet/worker/durable_eviction/manager"
+  require_relative "hatchet/worker/received_satisfied_orders"
   require_relative "hatchet/worker/durable_event_listener"
   require_relative "hatchet/worker/runner"
 
@@ -195,6 +200,14 @@ module Hatchet
     # @return [Hatchet::Features::Scheduled]
     def scheduled
       @scheduled ||= Hatchet::Features::Scheduled.new(rest_client, @config)
+    end
+
+    # The streams client publishes to and reads from durable topics. Unlike
+    # +runs.subscribe_to_stream+, topics are stored, independent of any run,
+    # and readers can resume from a cursor.
+    # @return [Hatchet::Features::Streams]
+    def streams
+      @streams ||= Hatchet::Features::Streams.new(rest_client, channel, @config)
     end
 
     # Define a Hatchet workflow, which can then declare tasks and be run,

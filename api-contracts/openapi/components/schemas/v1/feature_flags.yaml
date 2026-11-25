@@ -16,3 +16,5 @@ FeatureFlagId:
     - "trace-minimap-enabled"
     - "organization-sso-enabled"
     - "operator-details-enabled"
+    - "concurrency-page-enabled"
+    - "runs-filter-sidebar-enabled"

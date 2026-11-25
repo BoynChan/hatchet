@@ -130,11 +130,6 @@ func TestOpenClaimedRow(t *testing.T) {
 	assert.False(t, reg.Resumed)
 	assert.Equal(t, 1, h.operators.Count(), "a claimed row is not upserted")
 
-	op, err := h.operators.GetOperatorById(t.Context(), row.ID)
-	require.NoError(t, err)
-	require.NotNil(t, op.WorkerID)
-	assert.Equal(t, reg.WorkerId, *op.WorkerID, "the row points at the session's worker")
-
 	created := h.workers.Created()
 	require.Len(t, created, 1)
 	assert.Equal(t, "dag", created[0].Name)
@@ -155,7 +150,7 @@ func TestOpenClaimedRow(t *testing.T) {
 
 	require.NoError(t, s.Close(t.Context()))
 
-	assert.Equal(t, []string{"activate", "pause", "deactivate"}, h.workers.Ops(), "Close is pause then deactivate")
+	assert.Equal(t, []string{"release", "activate", "pause", "deactivate"}, h.workers.Ops(), "Close is pause then deactivate")
 	assert.False(t, h.workers.IsActive(reg.WorkerId))
 	assert.Equal(t, 1, h.dispatcher.ReleasedCount())
 	assert.Zero(t, h.SessionCount())
@@ -179,7 +174,6 @@ func TestOpenByName(t *testing.T) {
 	assert.Equal(t, "contract-op", op.Name)
 	assert.Equal(t, sqlcv1.V1OperatorKindGRPC, op.Kind, "the kind defaults to GRPC")
 	assert.Equal(t, sqlcv1.V1OperatorLeasingManagerSELF, op.LeasingManager, "the leasing defaults to SELF")
-	assert.Nil(t, op.WorkerID, "an upserted row is not pointed at its worker: the claimer never claims it")
 
 	created := h.workers.Created()
 	require.Len(t, created, 1)
@@ -217,31 +211,45 @@ func TestOpenRejects(t *testing.T) {
 }
 
 // Deltas larger than one engine delta are chunked; a delta the budget refuses fails the open and
-// leaves no half-open worker behind.
+// leaves no half-open worker behind. Reopening a claimed row releases the links of the worker it
+// was on, so the budget is the catalog's size, not the catalog times the number of restarts.
 func TestOpenInitialActionsChunkedAndBudgeted(t *testing.T) {
 	h := newTestHost(t, hostOpts{svcOpts: []operatorsvc.Opt{operatorsvc.WithMaxActionsPerOperator(1500)}})
 	row := h.claimedRow()
 
-	actions := make([]string, 0, 1500)
+	actions := make([]string, 0, 1501)
 
-	for i := 0; i < 1500; i++ {
+	for i := 0; i < 1501; i++ {
 		actions = append(actions, fmt.Sprintf("wf%d_orchestrator", i))
 	}
 
-	s, err := h.Open(t.Context(), operator.Identity{TenantId: h.tenant.ID, OperatorId: &row.ID}, operator.OpenOpts{Handler: nopHandler{}, Actions: actions})
+	s, err := h.Open(t.Context(), operator.Identity{TenantId: h.tenant.ID, OperatorId: &row.ID}, operator.OpenOpts{Handler: nopHandler{}, Actions: actions[:1500]})
 	require.NoError(t, err)
+	first := s.Registration().WorkerId
+	assert.Len(t, h.workers.ActionSet(first), 1500)
+
+	require.NoError(t, s.Close(t.Context()))
+
+	// the first worker held the whole budget; reopening the row frees it for the next worker
+	s, err = h.Open(t.Context(), operator.Identity{TenantId: h.tenant.ID, OperatorId: &row.ID}, operator.OpenOpts{Handler: nopHandler{}, Actions: actions[:1500]})
+	require.NoError(t, err)
+	assert.Empty(t, h.workers.ActionSet(first), "the closed worker's links are released")
 	assert.Len(t, h.workers.ActionSet(s.Registration().WorkerId), 1500)
 
 	require.NoError(t, s.Close(t.Context()))
 
-	// the operator now holds 1500 links, so the next worker has no budget left
-	_, err = h.Open(t.Context(), operator.Identity{TenantId: h.tenant.ID, OperatorId: &row.ID}, operator.OpenOpts{Handler: nopHandler{}, Actions: []string{"one-more_orchestrator"}})
+	// a catalog larger than the budget is refused on its second chunk, whole
+	_, err = h.Open(t.Context(), operator.Identity{TenantId: h.tenant.ID, OperatorId: &row.ID}, operator.OpenOpts{Handler: nopHandler{}, Actions: actions})
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(errors.Unwrap(err)))
 
 	assert.Zero(t, h.SessionCount())
-	assert.Equal(t, 2, h.dispatcher.ReleasedCount(), "the session opened for the refused worker is released")
-	assert.Equal(t, []string{"activate", "pause", "deactivate", "activate", "pause", "deactivate"}, h.workers.Ops(), "the refused worker is closed like any other")
+	assert.Equal(t, 3, h.dispatcher.ReleasedCount(), "the session opened for the refused worker is released")
+	assert.Equal(t, []string{
+		"release", "activate", "pause", "deactivate",
+		"release", "activate", "pause", "deactivate",
+		"release", "activate", "pause", "deactivate",
+	}, h.workers.Ops(), "the refused worker is closed like any other")
 }
 
 func TestDeltasAreSynchronous(t *testing.T) {
@@ -431,6 +439,89 @@ func TestOpenDurable(t *testing.T) {
 	resp, err := ch.Recv(t.Context())
 	require.NoError(t, err)
 	assert.NotNil(t, resp.GetMemoAck())
+}
+
+// OpenRunStream is the engine session's channel-backed stream: sends reach the dispatcher's
+// entry and the engine's responses come back; a closed session opens nothing.
+func TestOpenRunStream(t *testing.T) {
+	h := newTestHost(t, hostOpts{})
+
+	s, err := h.Open(t.Context(), operator.Identity{TenantId: h.tenant.ID, Name: "a"}, operator.OpenOpts{Handler: nopHandler{}})
+	require.NoError(t, err)
+
+	rs, err := s.OpenRunStream(t.Context(), operator.RunStreamDurableEvents, nil)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = rs.Close() })
+
+	streams := h.dispatcher.RunStreams()
+	require.Len(t, streams, 1)
+	assert.Equal(t, operator.RunStreamDurableEvents, streams[0].Kind)
+
+	require.NoError(t, rs.Send(t.Context(), &v1contracts.ListenForDurableEventRequest{TaskId: "t", SignalKey: "k"}))
+
+	sent := <-streams[0].Requests
+	assert.Equal(t, "k", sent.(*v1contracts.ListenForDurableEventRequest).SignalKey)
+
+	streams[0].Responses <- &v1contracts.DurableEvent{TaskId: "t", SignalKey: "k", Data: []byte("1")}
+
+	got, err := rs.Recv(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []byte("1"), got.(*v1contracts.DurableEvent).Data)
+
+	require.NoError(t, s.Close(t.Context()))
+
+	_, err = s.OpenRunStream(t.Context(), operator.RunStreamDurableEvents, nil)
+	assert.ErrorIs(t, err, operator.ErrSessionClosed)
+}
+
+// A topic subscription is served by the streams service, with the session's tenant on the
+// context, and the engine's messages come back; the engine refusing it, as it does for a
+// tenant without the durable streams entitlement, is what Recv reports once the stream ended.
+// A host without a streams service refuses the kind as unimplemented.
+func TestOpenRunStreamDurableStreams(t *testing.T) {
+	streams := operatorsvctest.NewStreams()
+	h := newTestHost(t, hostOpts{svcOpts: []operatorsvc.Opt{operatorsvc.WithStreamsBackend(streams)}})
+
+	s, err := h.Open(t.Context(), operator.Identity{TenantId: h.tenant.ID, Name: "a"}, operator.OpenOpts{Handler: nopHandler{}})
+	require.NoError(t, err)
+
+	_, err = s.OpenRunStream(t.Context(), operator.RunStreamDurableStreams, nil)
+	require.Error(t, err, "a server stream needs its request")
+
+	req := &v1contracts.SubscribeStreamRequest{Namespace: "ns", Topic: "orders"}
+	rs, err := s.OpenRunStream(t.Context(), operator.RunStreamDurableStreams, req)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = rs.Close() })
+
+	subscriptions := streams.Subscriptions()
+	require.Len(t, subscriptions, 1)
+	assert.Same(t, req, subscriptions[0].First)
+	assert.Nil(t, subscriptions[0].Requests, "Subscribe is a server stream")
+	require.NotNil(t, subscriptions[0].Tenant, "the session's tenant is on the context")
+	assert.Equal(t, h.tenant.ID, subscriptions[0].Tenant.ID)
+	assert.Empty(t, h.dispatcher.RunStreams(), "the dispatcher serves no topic subscription")
+
+	assert.ErrorIs(t, rs.Send(t.Context(), req), operator.ErrNotSupported)
+
+	subscriptions[0].Responses <- &v1contracts.StreamMessage{Cursor: "c1", Entries: []*v1contracts.StreamEntry{{Payload: []byte("1"), Cursor: "c1"}}}
+	subscriptions[0].EndWith(connect.NewError(connect.CodePermissionDenied, errors.New("durable streams are not enabled for this tenant")))
+
+	got, err := rs.Recv(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "c1", got.(*v1contracts.StreamMessage).Cursor)
+
+	_, err = rs.Recv(t.Context())
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err), "the engine's refusal keeps its code: %v", err)
+
+	bare := newTestHost(t, hostOpts{})
+
+	s, err = bare.Open(t.Context(), operator.Identity{TenantId: bare.tenant.ID, Name: "b"}, operator.OpenOpts{Handler: nopHandler{}})
+	require.NoError(t, err)
+
+	_, err = s.OpenRunStream(t.Context(), operator.RunStreamDurableStreams, req)
+	assert.Equal(t, connect.CodeUnimplemented, connect.CodeOf(err), "%v", err)
 }
 
 // The same handler the gRPC end-to-end suite hosts over OperatorService runs here unchanged:

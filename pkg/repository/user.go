@@ -2,7 +2,15 @@ package repository
 
 import (
 	"context"
+	"crypto/fips140"
+	"crypto/pbkdf2"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +42,8 @@ type OAuthOpts struct {
 type UpdateUserOpts struct {
 	EmailVerified *bool
 	Name          *string
+
+	RevokeSessions bool
 
 	// auth options
 	Password *string    `validate:"omitempty,required_without=OAuth,excluded_with=OAuth"`
@@ -73,15 +83,49 @@ type UserRepository interface {
 	ListTenantMemberships(ctx context.Context, userId uuid.UUID) ([]*sqlcv1.PopulateTenantMembersRow, error)
 }
 
+// The $pbkdf2-sha256$iterations$salt$hash layout resembles passlib's but is not compatible with it:
+// passlib uses a custom base64 alphabet, this uses standard raw base64. Do not align either side.
+const (
+	pbkdf2Prefix     = "$pbkdf2-sha256$"
+	pbkdf2Iterations = 600000
+	pbkdf2SaltLen    = 16
+	pbkdf2KeyLen     = 32
+)
+
+// ErrPasswordHashNotFIPS is returned in FIPS mode when a stored hash is bcrypt.
+var ErrPasswordHashNotFIPS = errors.New("password hash uses bcrypt, which is not permitted in FIPS mode; the password must be reset")
+
 func HashPassword(pw string) (*string, error) {
-	// hash the new password using bcrypt
-	hashedPw, err := bcrypt.GenerateFromPassword([]byte(pw), 10)
+	if !fips140.Enabled() {
+		hashedPw, err := bcrypt.GenerateFromPassword([]byte(pw), 10)
+
+		if err != nil {
+			return nil, fmt.Errorf("could not hash password: %w", err)
+		}
+
+		return StringPtr(string(hashedPw)), nil
+	}
+
+	salt := make([]byte, pbkdf2SaltLen)
+
+	if _, err := rand.Read(salt); err != nil {
+		return nil, fmt.Errorf("could not hash password: %w", err)
+	}
+
+	key, err := pbkdf2.Key(sha256.New, pw, salt, pbkdf2Iterations, pbkdf2KeyLen)
 
 	if err != nil {
 		return nil, fmt.Errorf("could not hash password: %w", err)
 	}
 
-	return StringPtr(string(hashedPw)), nil
+	enc := base64.RawStdEncoding
+
+	return StringPtr(fmt.Sprintf("%s%d$%s$%s", pbkdf2Prefix, pbkdf2Iterations, enc.EncodeToString(salt), enc.EncodeToString(key))), nil
+}
+
+// IsFIPSPasswordHash reports whether hashedPW is a PBKDF2-HMAC-SHA256 hash as produced by FIPS builds.
+func IsFIPSPasswordHash(hashedPW string) bool {
+	return strings.HasPrefix(hashedPW, pbkdf2Prefix)
 }
 
 func StringPtr(s string) *string {
@@ -97,9 +141,47 @@ func Int32Ptr(i int32) *int32 {
 }
 
 func VerifyPassword(hashedPW, candidate string) (bool, error) {
-	err := bcrypt.CompareHashAndPassword([]byte(hashedPW), []byte(candidate))
+	if !IsFIPSPasswordHash(hashedPW) {
+		if fips140.Enabled() {
+			return false, ErrPasswordHashNotFIPS
+		}
 
-	return err == nil, err
+		err := bcrypt.CompareHashAndPassword([]byte(hashedPW), []byte(candidate))
+
+		return err == nil, err
+	}
+
+	parts := strings.Split(strings.TrimPrefix(hashedPW, pbkdf2Prefix), "$")
+
+	if len(parts) != 3 {
+		return false, errors.New("malformed password hash")
+	}
+
+	iter, err := strconv.Atoi(parts[0])
+
+	if err != nil {
+		return false, fmt.Errorf("malformed password hash: %w", err)
+	}
+
+	salt, err := base64.RawStdEncoding.DecodeString(parts[1])
+
+	if err != nil {
+		return false, fmt.Errorf("malformed password hash: %w", err)
+	}
+
+	want, err := base64.RawStdEncoding.DecodeString(parts[2])
+
+	if err != nil {
+		return false, fmt.Errorf("malformed password hash: %w", err)
+	}
+
+	got, err := pbkdf2.Key(sha256.New, candidate, salt, iter, len(want))
+
+	if err != nil {
+		return false, err
+	}
+
+	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
 type userRepository struct {
@@ -123,17 +205,17 @@ func (r *userRepository) RegisterCreateCallback(callback UnscopedCallback[*UserC
 }
 
 func (r *userRepository) GetUserByID(ctx context.Context, id uuid.UUID) (*sqlcv1.User, error) {
-	return r.queries.GetUserByID(ctx, r.pool, id)
+	return r.queries.GetUserByID(ctx, r.pool.ForShared(), id)
 }
 
 func (r *userRepository) GetUserByEmail(ctx context.Context, email string) (*sqlcv1.User, error) {
 	emailLower := strings.ToLower(email)
 
-	return r.queries.GetUserByEmail(ctx, r.pool, emailLower)
+	return r.queries.GetUserByEmail(ctx, r.pool.ForShared(), emailLower)
 }
 
 func (r *userRepository) GetUserPassword(ctx context.Context, id uuid.UUID) (*sqlcv1.UserPassword, error) {
-	return r.queries.GetUserPassword(ctx, r.pool, id)
+	return r.queries.GetUserPassword(ctx, r.pool.ForShared(), id)
 }
 
 func (r *userRepository) CreateUser(ctx context.Context, opts *CreateUserOpts) (*sqlcv1.User, error) {
@@ -156,7 +238,7 @@ func (r *userRepository) CreateUser(ctx context.Context, opts *CreateUserOpts) (
 		params.Name = sqlchelpers.TextFromStr(*opts.Name)
 	}
 
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, r.pool, r.l)
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, r.pool.ForShared(), r.l)
 
 	if err != nil {
 		return nil, err
@@ -250,7 +332,7 @@ func (r *userRepository) updateUser(ctx context.Context, id uuid.UUID, opts *Upd
 		params.Name = sqlchelpers.TextFromStr(*opts.Name)
 	}
 
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, r.pool, r.l)
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, r.pool.ForShared(), r.l)
 
 	if err != nil {
 		return nil, err
@@ -311,7 +393,9 @@ func (r *userRepository) updateUser(ctx context.Context, id uuid.UUID, opts *Upd
 		if err := r.queries.DeleteUserPassword(ctx, tx, id); err != nil {
 			return nil, err
 		}
+	}
 
+	if resetLogin || opts.RevokeSessions {
 		if _, err := r.queries.DeleteUserSessionsByUserId(ctx, tx, sqlcv1.DeleteUserSessionsByUserIdParams{
 			Userid: id,
 		}); err != nil {
@@ -327,7 +411,7 @@ func (r *userRepository) updateUser(ctx context.Context, id uuid.UUID, opts *Upd
 }
 
 func (r *userRepository) ListTenantMemberships(ctx context.Context, userId uuid.UUID) ([]*sqlcv1.PopulateTenantMembersRow, error) {
-	memberships, err := r.queries.ListTenantMemberships(ctx, r.pool, userId)
+	memberships, err := r.queries.ListTenantMemberships(ctx, r.pool.ForShared(), userId)
 
 	if err != nil {
 		return nil, err
@@ -339,5 +423,5 @@ func (r *userRepository) ListTenantMemberships(ctx context.Context, userId uuid.
 		ids[i] = m.ID
 	}
 
-	return r.populateTenantMembers(ctx, ids)
+	return r.populateTenantMembers(ctx, r.pool.ForShared(), ids)
 }

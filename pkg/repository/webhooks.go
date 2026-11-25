@@ -7,6 +7,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/hatchet-dev/hatchet/pkg/enums"
+	"github.com/hatchet-dev/hatchet/pkg/repository/sqlchelpers"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
@@ -56,17 +58,17 @@ type APIKeyAuthCredentials struct {
 }
 
 type HMACAuthCredentials struct {
-	Algorithm                     sqlcv1.V1IncomingWebhookHmacAlgorithm `json:"algorithm" validate:"required"`
-	Encoding                      sqlcv1.V1IncomingWebhookHmacEncoding  `json:"encoding" validate:"required"`
-	SignatureHeaderName           string                                `json:"signature_header_name" validate:"required"`
-	EncryptedWebhookSigningSecret []byte                                `json:"webhook_signing_secret" validate:"required"`
+	Algorithm                     enums.V1IncomingWebhookHmacAlgorithm `json:"algorithm" validate:"required"`
+	Encoding                      enums.V1IncomingWebhookHmacEncoding  `json:"encoding" validate:"required"`
+	SignatureHeaderName           string                               `json:"signature_header_name" validate:"required"`
+	EncryptedWebhookSigningSecret []byte                               `json:"webhook_signing_secret" validate:"required"`
 }
 
 type AuthConfig struct {
-	Type       sqlcv1.V1IncomingWebhookAuthType `json:"type" validate:"required"`
-	BasicAuth  *BasicAuthCredentials            `json:"basic_auth,omitempty"`
-	APIKeyAuth *APIKeyAuthCredentials           `json:"api_key_auth,omitempty"`
-	HMACAuth   *HMACAuthCredentials             `json:"hmac_auth,omitempty"`
+	Type       enums.V1IncomingWebhookAuthType `json:"type" validate:"required"`
+	BasicAuth  *BasicAuthCredentials           `json:"basic_auth,omitempty"`
+	APIKeyAuth *APIKeyAuthCredentials          `json:"api_key_auth,omitempty"`
+	HMACAuth   *HMACAuthCredentials            `json:"hmac_auth,omitempty"`
 }
 
 func (ac *AuthConfig) Validate() error {
@@ -87,15 +89,15 @@ func (ac *AuthConfig) Validate() error {
 	}
 
 	switch ac.Type {
-	case sqlcv1.V1IncomingWebhookAuthTypeBASIC:
+	case enums.V1IncomingWebhookAuthTypeBASIC:
 		if ac.BasicAuth == nil {
 			return fmt.Errorf("basic auth credentials must be provided when type is BASIC")
 		}
-	case sqlcv1.V1IncomingWebhookAuthTypeAPIKEY:
+	case enums.V1IncomingWebhookAuthTypeAPIKEY:
 		if ac.APIKeyAuth == nil {
 			return fmt.Errorf("api key auth credentials must be provided when type is API_KEY")
 		}
-	case sqlcv1.V1IncomingWebhookAuthTypeHMAC:
+	case enums.V1IncomingWebhookAuthTypeHMAC:
 		if ac.HMACAuth == nil {
 			return fmt.Errorf("hmac auth credentials must be provided when type is HMAC")
 		}
@@ -107,17 +109,19 @@ func (ac *AuthConfig) Validate() error {
 }
 
 type CreateWebhookOpts struct {
-	Tenantid                     uuid.UUID                          `json:"tenantid"`
-	Sourcename                   sqlcv1.V1IncomingWebhookSourceName `json:"sourcename"`
-	Name                         string                             `json:"name" validate:"required"`
-	Eventkeyexpression           string                             `json:"eventkeyexpression"`
-	ScopeExpression              *string                            `json:"scope_expression,omitempty"`
-	StaticPayload                []byte                             `json:"static_payload,omitempty"`
-	ReturnEventAsResponsePayload bool                               `json:"return_event_as_response_payload"`
-	AuthConfig                   AuthConfig                         `json:"auth_config,omitempty"`
+	Tenantid                     uuid.UUID                         `json:"tenantid"`
+	Sourcename                   enums.V1IncomingWebhookSourceName `json:"sourcename"`
+	Name                         string                            `json:"name" validate:"required"`
+	Eventkeyexpression           string                            `json:"eventkeyexpression"`
+	ScopeExpression              *string                           `json:"scope_expression,omitempty"`
+	StaticPayload                []byte                            `json:"static_payload,omitempty"`
+	ReturnEventAsResponsePayload bool                              `json:"return_event_as_response_payload"`
+	AuthConfig                   AuthConfig                        `json:"auth_config,omitempty"`
 }
 
 func (r *webhookRepository) CreateWebhook(ctx context.Context, tenantId uuid.UUID, opts CreateWebhookOpts) (*sqlcv1.V1IncomingWebhook, error) {
+	db := r.pool.ForTenant(tenantId)
+
 	if err := r.v.Validate(opts); err != nil {
 		return nil, err
 	}
@@ -147,28 +151,22 @@ func (r *webhookRepository) CreateWebhook(ctx context.Context, tenantId uuid.UUI
 	}
 
 	switch opts.AuthConfig.Type {
-	case sqlcv1.V1IncomingWebhookAuthTypeBASIC:
+	case enums.V1IncomingWebhookAuthTypeBASIC:
 		params.AuthBasicUsername = pgtype.Text{
 			String: opts.AuthConfig.BasicAuth.Username,
 			Valid:  true,
 		}
 		params.Authbasicpassword = opts.AuthConfig.BasicAuth.EncryptedPassword
-	case sqlcv1.V1IncomingWebhookAuthTypeAPIKEY:
+	case enums.V1IncomingWebhookAuthTypeAPIKEY:
 		params.AuthApiKeyHeaderName = pgtype.Text{
 			String: opts.AuthConfig.APIKeyAuth.HeaderName,
 			Valid:  true,
 		}
 
 		params.Authapikeykey = opts.AuthConfig.APIKeyAuth.EncryptedKey
-	case sqlcv1.V1IncomingWebhookAuthTypeHMAC:
-		params.AuthHmacAlgorithm = sqlcv1.NullV1IncomingWebhookHmacAlgorithm{
-			V1IncomingWebhookHmacAlgorithm: opts.AuthConfig.HMACAuth.Algorithm,
-			Valid:                          true,
-		}
-		params.AuthHmacEncoding = sqlcv1.NullV1IncomingWebhookHmacEncoding{
-			V1IncomingWebhookHmacEncoding: opts.AuthConfig.HMACAuth.Encoding,
-			Valid:                         true,
-		}
+	case enums.V1IncomingWebhookAuthTypeHMAC:
+		params.AuthHmacAlgorithm = &opts.AuthConfig.HMACAuth.Algorithm
+		params.AuthHmacEncoding = &opts.AuthConfig.HMACAuth.Encoding
 		params.AuthHmacSignatureHeaderName = pgtype.Text{
 			String: opts.AuthConfig.HMACAuth.SignatureHeaderName,
 			Valid:  true,
@@ -178,22 +176,39 @@ func (r *webhookRepository) CreateWebhook(ctx context.Context, tenantId uuid.UUI
 		return nil, fmt.Errorf("unsupported auth type: %s", opts.AuthConfig.Type)
 	}
 
-	created, err := r.queries.CreateWebhook(ctx, r.pool, params)
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, r.l)
 	if err != nil {
 		return nil, err
 	}
+	defer rollback()
+
+	created, err := r.queries.CreateWebhook(ctx, tx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := adjustAllocatedResourceCounts(ctx, r.queries, tx, tenantId, allocatedResourceCountDelta{Webhook: 1}); err != nil {
+		return nil, err
+	}
+
+	if err := commit(ctx); err != nil {
+		return nil, err
+	}
+
 	r.notifyAllocatedResourceChange(tenantId)
 	return created, nil
 }
 
 type ListWebhooksOpts struct {
-	WebhookNames       []string                             `json:"webhook_names"`
-	WebhookSourceNames []sqlcv1.V1IncomingWebhookSourceName `json:"webhook_source_names"`
-	Limit              *int64                               `json:"limit" validate:"omitnil,min=1"`
-	Offset             *int64                               `json:"offset" validate:"omitnil,min=0"`
+	WebhookNames       []string                            `json:"webhook_names"`
+	WebhookSourceNames []enums.V1IncomingWebhookSourceName `json:"webhook_source_names"`
+	Limit              *int64                              `json:"limit" validate:"omitnil,min=1"`
+	Offset             *int64                              `json:"offset" validate:"omitnil,min=0"`
 }
 
 func (r *webhookRepository) ListWebhooks(ctx context.Context, tenantId uuid.UUID, opts ListWebhooksOpts) ([]*sqlcv1.V1IncomingWebhook, error) {
+	db := r.pool.ForTenant(tenantId)
+
 	if err := r.v.Validate(opts); err != nil {
 		return nil, err
 	}
@@ -215,7 +230,7 @@ func (r *webhookRepository) ListWebhooks(ctx context.Context, tenantId uuid.UUID
 		}
 	}
 
-	return r.queries.ListWebhooks(ctx, r.pool, sqlcv1.ListWebhooksParams{
+	return r.queries.ListWebhooks(ctx, db, sqlcv1.ListWebhooksParams{
 		Tenantid:      tenantId,
 		Webhooknames:  opts.WebhookNames,
 		Sourcenames:   opts.WebhookSourceNames,
@@ -226,26 +241,47 @@ func (r *webhookRepository) ListWebhooks(ctx context.Context, tenantId uuid.UUID
 }
 
 func (r *webhookRepository) DeleteWebhook(ctx context.Context, tenantId uuid.UUID, name string) (*sqlcv1.V1IncomingWebhook, error) {
-	deleted, err := r.queries.DeleteWebhook(ctx, r.pool, sqlcv1.DeleteWebhookParams{
+	db := r.pool.ForTenant(tenantId)
+
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, r.l)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback()
+
+	deleted, err := r.queries.DeleteWebhook(ctx, tx, sqlcv1.DeleteWebhookParams{
 		Tenantid: tenantId,
 		Name:     name,
 	})
 	if err != nil {
 		return nil, err
 	}
+
+	if err := adjustAllocatedResourceCounts(ctx, r.queries, tx, tenantId, allocatedResourceCountDelta{Webhook: -1}); err != nil {
+		return nil, err
+	}
+
+	if err := commit(ctx); err != nil {
+		return nil, err
+	}
+
 	r.notifyAllocatedResourceChange(tenantId)
 	return deleted, nil
 }
 
 func (r *webhookRepository) GetWebhook(ctx context.Context, tenantId uuid.UUID, name string) (*sqlcv1.V1IncomingWebhook, error) {
-	return r.queries.GetWebhook(ctx, r.pool, sqlcv1.GetWebhookParams{
+	db := r.pool.ForTenant(tenantId)
+
+	return r.queries.GetWebhook(ctx, db, sqlcv1.GetWebhookParams{
 		Tenantid: tenantId,
 		Name:     name,
 	})
 }
 
 func (r *webhookRepository) CanCreate(ctx context.Context, tenantId uuid.UUID, webhookLimit int32) (bool, error) {
-	return r.queries.CanCreateWebhook(ctx, r.pool, sqlcv1.CanCreateWebhookParams{
+	db := r.pool.ForTenant(tenantId)
+
+	return r.queries.CanCreateWebhook(ctx, db, sqlcv1.CanCreateWebhookParams{
 		Tenantid:     tenantId,
 		Webhooklimit: webhookLimit,
 	})
@@ -259,6 +295,8 @@ type UpdateWebhookOpts struct {
 }
 
 func (r *webhookRepository) UpdateWebhook(ctx context.Context, tenantId uuid.UUID, webhookName string, opts UpdateWebhookOpts) (*sqlcv1.V1IncomingWebhook, error) {
+	db := r.pool.ForTenant(tenantId)
+
 	params := sqlcv1.UpdateWebhookExpressionParams{
 		Tenantid:    tenantId,
 		Webhookname: webhookName,
@@ -289,5 +327,5 @@ func (r *webhookRepository) UpdateWebhook(ctx context.Context, tenantId uuid.UUI
 		}
 	}
 
-	return r.queries.UpdateWebhookExpression(ctx, r.pool, params)
+	return r.queries.UpdateWebhookExpression(ctx, db, params)
 }

@@ -18,13 +18,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hatchet-dev/hatchet/pkg/repository/fairpool"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
 func createOLAPRepository(pool *pgxpool.Pool) *OLAPRepositoryImpl {
 	logger := zerolog.Nop()
 	shared := &sharedRepository{
-		pool:    pool,
+		pool:    fairpool.Ungated(pool),
 		ddlPool: pool,
 		l:       &logger,
 		queries: sqlcv1.New(),
@@ -34,11 +35,9 @@ func createOLAPRepository(pool *pgxpool.Pool) *OLAPRepositoryImpl {
 		panic(err)
 	}
 	return &OLAPRepositoryImpl{
-		sharedRepository:                    shared,
-		eventCache:                          eventCache,
-		olapRetentionPeriod:                 24 * time.Hour,
-		shouldManageOptionalTablePartitions: false,
-		shouldPartitionOtelTables:           false,
+		sharedRepository:    shared,
+		eventCache:          eventCache,
+		olapRetentionPeriod: 24 * time.Hour,
 	}
 }
 
@@ -243,7 +242,7 @@ func TestOLAPUpdateTablePartitions_LookupTablePartitionsHaveUniqueExternalId(t *
 	queries := sqlcv1.New()
 	twoMonthsAhead := time.Now().UTC().AddDate(0, 2, 0)
 
-	creations, err := queries.CreateOLAPOptionalTablePartitions(ctx, pool, pgtype.Date{Time: twoMonthsAhead, Valid: true})
+	creations, err := queries.CreateOLAPPartitions(ctx, pool, sqlcv1.CreateOLAPPartitionsParams{Date: pgtype.Date{Time: twoMonthsAhead, Valid: true}, Partitions: NUM_PARTITIONS})
 	require.NoError(t, err)
 	require.Equal(t, int32(1), creations.V1LookupTableOlap, "should create a new monthly lookup table partition")
 	require.Equal(t, int32(1), creations.V1StatusesOlap, "should create a new monthly statuses partition")
@@ -304,17 +303,7 @@ func TestWP3CoreAndOLAPPartitionSlimming(t *testing.T) {
 
 	l := zerolog.Nop()
 	shared := &sharedRepository{l: &l, queries: queries}
-
-	t.Setenv("SERVER_MANAGE_OPTIONAL_PARTITIONS", "")
-	t.Setenv("SERVER_OTEL_SPANS_ENABLED", "")
-	olapRepo := newOLAPRepository(shared, 72*time.Hour, false, false, StatusUpdateBatchSizeLimits{}).(*OLAPRepositoryImpl)
-	assert.False(t, olapRepo.shouldManageOptionalTablePartitions)
-	assert.False(t, olapRepo.shouldPartitionOtelTables)
-
-	t.Setenv("SERVER_MANAGE_OPTIONAL_PARTITIONS", "true")
-	t.Setenv("SERVER_OTEL_SPANS_ENABLED", "true")
-	olapRepoEnabled := newOLAPRepository(shared, 72*time.Hour, false, false, StatusUpdateBatchSizeLimits{}).(*OLAPRepositoryImpl)
-	assert.True(t, olapRepoEnabled.shouldManageOptionalTablePartitions)
-	assert.True(t, olapRepoEnabled.shouldPartitionOtelTables)
+	olapRepo := newOLAPRepository(shared, 72*time.Hour, StatusUpdateBatchSizeLimits{}, false).(*OLAPRepositoryImpl)
+	assert.NotNil(t, olapRepo)
 }
 

@@ -1,16 +1,16 @@
 package repository
 
 import (
-	"context"
-	"errors"
 	"log"
+	"sync"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/hashicorp/golang-lru/v2/expirable"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
+
+	"github.com/hatchet-dev/hatchet/pkg/repository/fairpool"
 
 	"github.com/hatchet-dev/hatchet/internal/cel"
 	"github.com/hatchet-dev/hatchet/pkg/config/limits"
@@ -34,8 +34,13 @@ type streamTopicKey struct {
 	topic     string
 }
 
+type eventKeyTenantIdTuple struct {
+	tenantId uuid.UUID
+	eventKey string
+}
+
 type sharedRepository struct {
-	pool    *pgxpool.Pool
+	pool    *fairpool.Pool
 	ddlPool *pgxpool.Pool // bypasses pgbouncer for DDL operations
 	v       validator.Validator
 	l       *zerolog.Logger
@@ -44,7 +49,6 @@ type sharedRepository struct {
 	limitConfig limits.LimitConfigFile
 
 	queueCache               *cache.Cache
-	stepExpressionCache      *cache.Cache
 	concurrencyStrategyCache *cache.Cache
 
 	tenantIdWorkflowNameCache   *expirable.LRU[string, *sqlcv1.ListWorkflowsByNamesRow]
@@ -55,19 +59,38 @@ type sharedRepository struct {
 	stepIdSlotRequestsCache     *expirable.LRU[uuid.UUID, map[string]int32]
 	stepIdHasBatchConfigCache   *expirable.LRU[uuid.UUID, bool]
 	stepIdMatchConditionsCache  *expirable.LRU[uuid.UUID, []*sqlcv1.V1StepMatchCondition]
+	stepIdExpressionsCache      *expirable.LRU[uuid.UUID, []*sqlcv1.StepExpression]
 
 	streamTopicSeenCache *expirable.LRU[streamTopicKey, struct{}]
 
-	celParser            *cel.CELParser
-	boolExprEvaluator    *cel.BoolExprEvaluator
-	taskLookupCache      *lru.Cache[taskExternalIdTenantIdTuple, *sqlcv1.FlattenExternalIdsRow]
-	payloadStore         PayloadStoreRepository
-	m                    TenantLimitRepository
-	reassignUnackedTasks bool
+	eventKeyWorkflowsCache *expirable.LRU[eventKeyTenantIdTuple, []*sqlcv1.ListWorkflowsForEventsRow]
+
+	// eventKeyWorkflowsDrops counts InvalidateEventKeyWorkflows calls. A lookup caches its result
+	// only if no drop happened while it ran, since it may have read Postgres before the commit.
+	eventKeyWorkflowsMu    sync.Mutex
+	eventKeyWorkflowsDrops uint64
+
+	rateLimitPauseCache *expirable.LRU[uuid.UUID, bool]
+
+	celParser         *cel.CELParser
+	boolExprEvaluator *cel.BoolExprEvaluator
+	taskLookupCache   *lru.Cache[taskExternalIdTenantIdTuple, *sqlcv1.FlattenExternalIdsRow]
+	payloadStore      PayloadStoreRepository
+	m                 TenantLimitRepository
+	entitlements      *tenantEntitlementRepository
+
+	// taskKeyCache has no TTL because a task's external id maps to the same primary key for as long as the task exists
+	taskKeyCache *lru.Cache[taskExternalIdTenantIdTuple, IdInsertedAt]
+
+	wrapTaskInputInStepRunData bool
+	enablePayloadConsolidation bool
+	reassignUnackedTasks       bool
+	childRunDirectSpawn        bool
 }
 
 func newSharedRepository(
-	pool, ddlPool *pgxpool.Pool,
+	pool *fairpool.Pool,
+	ddlPool *pgxpool.Pool,
 	v validator.Validator,
 	l *zerolog.Logger,
 	payloadStoreOpts PayloadStoreRepositoryOpts,
@@ -75,10 +98,10 @@ func newSharedRepository(
 	shouldEnforceLimits bool,
 	cacheDuration time.Duration,
 	reassignUnackedTasks bool,
+	childRunDirectSpawn bool,
 ) (*sharedRepository, func() error) {
 	queries := sqlcv1.New()
 	queueCache := cache.New(5 * time.Minute)
-	stepExpressionCache := cache.New(5 * time.Minute)
 	concurrencyStrategyCache := cache.New(5 * time.Minute)
 	payloadStore := NewPayloadStoreRepository(pool, l, queries, payloadStoreOpts)
 
@@ -92,7 +115,11 @@ func newSharedRepository(
 	stepIdSlotRequestsCache := expirable.NewLRU(10000, func(key uuid.UUID, value map[string]int32) {}, 5*time.Minute)
 	stepIdHasBatchConfigCache := expirable.NewLRU(10000, func(key uuid.UUID, value bool) {}, 5*time.Minute)
 	stepIdMatchConditionsCache := expirable.NewLRU(10000, func(key uuid.UUID, value []*sqlcv1.V1StepMatchCondition) {}, 5*time.Minute)
+	stepIdExpressionsCache := expirable.NewLRU(10000, func(key uuid.UUID, value []*sqlcv1.StepExpression) {}, 5*time.Minute)
 	streamTopicSeenCache := expirable.NewLRU(10000, func(key streamTopicKey, value struct{}) {}, time.Hour)
+	eventKeyWorkflowsCache := expirable.NewLRU(10000, func(key eventKeyTenantIdTuple, value []*sqlcv1.ListWorkflowsForEventsRow) {}, 5*time.Second)
+	// short TTL since a pause set through another engine is only seen once this expires; the scheduler holds anything created in between
+	rateLimitPauseCache := expirable.NewLRU(10000, func(key uuid.UUID, value bool) {}, 5*time.Second)
 
 	celParser := cel.NewCELParser()
 
@@ -108,6 +135,12 @@ func newSharedRepository(
 		log.Fatalf("failed to create LRU cache: %v", err)
 	}
 
+	taskKeyCache, err := lru.New[taskExternalIdTenantIdTuple, IdInsertedAt](100000)
+
+	if err != nil {
+		log.Fatalf("failed to create LRU cache: %v", err)
+	}
+
 	s := &sharedRepository{
 		pool:                        pool,
 		ddlPool:                     ddlPool,
@@ -116,7 +149,6 @@ func newSharedRepository(
 		queries:                     queries,
 		limitConfig:                 c,
 		queueCache:                  queueCache,
-		stepExpressionCache:         stepExpressionCache,
 		concurrencyStrategyCache:    concurrencyStrategyCache,
 		tenantIdWorkflowNameCache:   tenantIdWorkflowNameCache,
 		workflowIdNameCache:         workflowIdNameCache,
@@ -126,53 +158,31 @@ func newSharedRepository(
 		stepIdSlotRequestsCache:     stepIdSlotRequestsCache,
 		stepIdHasBatchConfigCache:   stepIdHasBatchConfigCache,
 		stepIdMatchConditionsCache:  stepIdMatchConditionsCache,
+		stepIdExpressionsCache:      stepIdExpressionsCache,
 		streamTopicSeenCache:        streamTopicSeenCache,
+		rateLimitPauseCache:         rateLimitPauseCache,
+		eventKeyWorkflowsCache:      eventKeyWorkflowsCache,
 		celParser:                   celParser,
 		boolExprEvaluator:           boolExprEvaluator,
 		taskLookupCache:             lookupCache,
+		taskKeyCache:                taskKeyCache,
 		payloadStore:                payloadStore,
+		wrapTaskInputInStepRunData:  payloadStoreOpts.WrapTaskInputInStepRunData,
+		enablePayloadConsolidation:  payloadStoreOpts.EnablePayloadConsolidation,
 		reassignUnackedTasks:        reassignUnackedTasks,
+		childRunDirectSpawn:         childRunDirectSpawn,
 	}
 
 	tenantLimitRepository := newTenantLimitRepository(s, c, shouldEnforceLimits, cacheDuration)
 
 	s.m = tenantLimitRepository
+	s.entitlements = newTenantEntitlementRepository(s)
 
 	return s, s.cleanup
 }
 
-func (s *sharedRepository) isDagOperatorEnabled(ctx context.Context, db sqlcv1.DBTX, tenantId uuid.UUID) (bool, error) {
-	// fixme: can probably cache this?
-	entitlement, err := s.queries.GetTenantEntitlement(ctx, db, tenantId)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
-
-		return false, err
-	}
-
-	return entitlement.DagOperator, nil
-}
-
-func (s *sharedRepository) hasDAGOperator(ctx context.Context, tenantId uuid.UUID) (bool, error) {
-	enabled, err := s.isDagOperatorEnabled(ctx, s.pool, tenantId)
-
-	if err != nil {
-		return false, err
-	}
-
-	if !enabled {
-		return false, nil
-	}
-
-	return s.queries.TenantHasDAGOperator(ctx, s.pool, tenantId)
-}
-
 func (s *sharedRepository) cleanup() error {
 	s.queueCache.Stop()
-	s.stepExpressionCache.Stop()
 	s.concurrencyStrategyCache.Stop()
 	s.m.Stop()
 	return nil

@@ -1,5 +1,6 @@
 name: typescript
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - ".github/**"
@@ -8,17 +9,25 @@ on:
       - "internal/**"
       - "pkg/**"
       - "sdks/typescript/**"
+      - "sdks/typescript-serverless/**"
+      - "sdks/typescript-sandbox/**"
+      - "sdks/typescript-pi-durable/**"
+      - "examples/serverless/cloudflare-workers/**"
   push:
     branches:
       - main
     paths:
       - "sdks/typescript/**"
+      - "sdks/typescript-serverless/**"
+      - "sdks/typescript-sandbox/**"
+      - "sdks/typescript-pi-durable/**"
 defaults:
   run:
     working-directory: ./sdks/typescript
 
 jobs:
   lint:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubicloud-standard-4
     strategy:
       matrix:
@@ -93,7 +102,7 @@ jobs:
         if: matrix.package-manager == 'pnpm'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
 
       - name: Install Protoc
         if: matrix.package-manager == 'pnpm'
@@ -122,19 +131,21 @@ jobs:
         if: matrix.package-manager == 'pnpm'
         run: |
           pnpm run generate-api
+          pnpm run generate-api-fetch
           ./generate-protoc.sh
           ./generate-protoc-es.sh
 
       - name: Check generated bindings are up to date
         if: matrix.package-manager == 'pnpm'
         run: |
-          git add -A src/protoc src/protoc-es src/clients/rest/generated
-          if ! git diff --cached --exit-code -- src/protoc src/protoc-es src/clients/rest/generated; then
-            echo "::error::Generated protobuf/REST bindings are out of date. Run 'pnpm run generate-api', 'sdks/typescript/generate-protoc.sh' and 'sdks/typescript/generate-protoc-es.sh' and commit the changes."
+          git add -A src/protoc src/protoc-es src/clients/rest/generated src/clients/rest/generated-fetch
+          if ! git diff --cached --exit-code -- src/protoc src/protoc-es src/clients/rest/generated src/clients/rest/generated-fetch; then
+            echo "::error::Generated protobuf/REST bindings are out of date. Run 'pnpm run generate-api', 'pnpm run generate-api-fetch', 'sdks/typescript/generate-protoc.sh' and 'sdks/typescript/generate-protoc-es.sh' and commit the changes."
             exit 1
           fi
 
   test-unit:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubicloud-standard-4
     strategy:
       matrix:
@@ -191,6 +202,7 @@ jobs:
         run: ${{ matrix.unit-test-cmd }}
 
   test-e2e:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubicloud-standard-4
     timeout-minutes: 20
     strategy:
@@ -229,7 +241,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
 
       - name: Install pnpm
         if: matrix.package-manager == 'pnpm'
@@ -284,6 +296,8 @@ jobs:
           export DATABASE_LOGGER_LEVEL=warn
           export DATABASE_LOGGER_FORMAT=console
           export SERVER_SECURITY_CHECK_ENABLED=false
+          export SERVER_PAYLOAD_STORE_WRAP_TASK_INPUT_IN_STEP_RUN_DATA=false
+          export SERVER_PAYLOAD_STORE_ENABLE_PAYLOAD_CONSOLIDATION=true
 
           go run ./cmd/hatchet-admin quickstart
 
@@ -312,35 +326,314 @@ jobs:
 
       - name: Upload engine logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdk-typescript-engine-logs-${{ matrix.package-manager }}
           path: engine.log
 
       - name: Upload API logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdk-typescript-api-logs-${{ matrix.package-manager }}
           path: api.log
 
-  publish:
+  serverless:
+    # @hatchet-dev/serverless links the SDK from its build output, so the SDK is built first.
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubicloud-standard-4
+    defaults:
+      run:
+        working-directory: ./sdks/typescript-serverless
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10.16.1
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('sdks/typescript/pnpm-lock.yaml', 'sdks/typescript-serverless/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Build the SDK dist the package links
+        working-directory: ./sdks/typescript
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm tsc:build
+          pnpm prepublish
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build and check the runtime entries are free of Node imports
+        run: pnpm check:edge
+
+      - name: Type check and bundle the Cloudflare example
+        working-directory: ./examples/serverless/cloudflare-workers
+        run: |
+          pnpm install
+          pnpm exec tsc --noEmit
+          pnpm exec wrangler deploy --dry-run --outdir dist
+
+  sandbox:
+    # @hatchet-dev/sandbox links the SDK from its build output, so the SDK is built first.
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubicloud-standard-4
+    defaults:
+      run:
+        working-directory: ./sdks/typescript-sandbox
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10.16.1
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('sdks/typescript/pnpm-lock.yaml', 'sdks/typescript-sandbox/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Build the SDK dist the package links
+        working-directory: ./sdks/typescript
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm tsc:build
+          pnpm prepublish
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+  pi-durable:
+    # @hatchet-dev/pi-durable links the SDK and @hatchet-dev/sandbox from their build output, so both
+    # are built first.
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubicloud-standard-4
+    defaults:
+      run:
+        working-directory: ./sdks/typescript-pi-durable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.x"
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10.16.1
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('sdks/typescript/pnpm-lock.yaml', 'sdks/typescript-sandbox/pnpm-lock.yaml', 'sdks/typescript-pi-durable/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Build the SDK dist the package links
+        working-directory: ./sdks/typescript
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm tsc:build
+          pnpm prepublish
+
+      - name: Build the sandbox package the package links
+        working-directory: ./sdks/typescript-sandbox
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+  pi-durable-e2e:
+    # Sessions against a real engine: a fake sandbox provider serves the sandbox task from folders on the runner, and
+    # pi-ai's faux provider stands in for the model, so the job needs neither brickie nor a model API key.
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.x"
+
+      - name: Install pnpm
+        run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" npm install -g pnpm@10.16.1
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('sdks/typescript/pnpm-lock.yaml', 'sdks/typescript-sandbox/pnpm-lock.yaml', 'sdks/typescript-pi-durable/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Compose
+        working-directory: .
+        run: docker compose up -d
+
+      - name: Build the SDK dist the package links
+        run: |
+          sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+          pnpm tsc:build
+          pnpm prepublish
+
+      - name: Build the sandbox package the package links
+        working-directory: ./sdks/typescript-sandbox
+        run: |
+          sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Install dependencies
+        working-directory: ./sdks/typescript-pi-durable
+        run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+
+      - name: Setup
+        working-directory: .
+        run: |
+          export DATABASE_URL="postgresql://hatchet:hatchet@127.0.0.1:5431/hatchet"
+          export SERVER_PORT=8080
+          export SERVER_URL=http://localhost:8080
+          export SERVER_AUTH_COOKIE_DOMAIN=localhost
+          export SERVER_AUTH_COOKIE_INSECURE=true
+          export SERVER_MSGQUEUE_RABBITMQ_URL="amqp://user:password@localhost:5672/"
+          export SERVER_LOGGER_LEVEL=info
+          export SERVER_LOGGER_FORMAT=console
+          export DATABASE_LOGGER_LEVEL=warn
+          export DATABASE_LOGGER_FORMAT=console
+          export SERVER_SECURITY_CHECK_ENABLED=false
+          # The quickstart certificate is for "cluster": the API cancels runs (an aborted command) over gRPC.
+          export SERVER_INTERNAL_CLIENT_TLS_SERVER_NAME=cluster
+
+          go run ./cmd/hatchet-migrate
+          go run ./cmd/hatchet-admin quickstart
+
+          # sessions read and write durable streams
+          docker compose exec -T postgres psql -U hatchet -d hatchet -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO tenant_entitlement (tenant_id, durable_streams)
+          SELECT id, TRUE
+          FROM "Tenant"
+          ON CONFLICT (tenant_id) DO UPDATE SET durable_streams = TRUE;
+          SQL
+
+          go run ./cmd/hatchet-engine --config ./generated/ 2>&1 | tee $GITHUB_WORKSPACE/engine.log &
+          go run ./cmd/hatchet-api --config ./generated/ 2>&1 | tee $GITHUB_WORKSPACE/api.log &
+
+          sleep 30
+
+      - name: E2E tests
+        working-directory: ./sdks/typescript-pi-durable
+        run: |
+          export HATCHET_CLIENT_TOKEN="$(cd ../.. && go run ./cmd/hatchet-admin token create --config ./generated/ --tenant-id 707d0855-80ab-4e1f-a156-f1c4546cbf52)"
+          export HATCHET_CLIENT_TLS_ROOT_CA_FILE=../../certs/ca.cert
+          export HATCHET_CLIENT_TLS_SERVER_NAME=cluster
+          pnpm test:e2e
+
+      - name: Upload engine logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-typescript-pi-durable-engine-logs
+          path: engine.log
+
+      - name: Upload API logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-typescript-pi-durable-api-logs
+          path: api.log
+
+  publish:
+    # npm trusted publishing only accepts OIDC from GitHub-hosted runners.
+    runs-on: ubuntu-latest
     needs: [lint, test-unit, test-e2e]
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          check-latest: true
+          node-version: "24.x"
+
       - name: Install pnpm
         run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" npm install -g pnpm@10.16.1
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24.x"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Get pnpm store directory
         shell: bash
@@ -360,7 +653,7 @@ jobs:
 
       - name: Build and Publish SDK
         run: |
-          VERSION=$(jq '.version' package.json)
+          VERSION=$(jq -r '.version' package.json)
           CURRENT_NPM_VERSION=$(pnpm view @hatchet-dev/typescript-sdk version)
 
           if [[ "$VERSION" == "$CURRENT_NPM_VERSION" ]]; then
@@ -376,8 +669,6 @@ jobs:
               pnpm publish:ci
           fi
           echo "VERSION_TAG=$NEW_VERSION" >> $GITHUB_ENV
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: "Generate release notes"
         if: env.VERSION_TAG != ''
@@ -393,6 +684,303 @@ jobs:
           gh release create "ts/${VERSION_TAG}" \
             --target "$GITHUB_SHA" \
             --title "Typescript SDK ${VERSION_TAG}" \
+            --notes-file ./release_notes.md \
+            --latest=false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-serverless:
+    # @hatchet-dev/serverless declares the SDK as a peer, so it publishes after the SDK's own
+    # publish job (which exits early when the SDK version is unchanged) and only when its version
+    # is not on npm yet. A manual run skips the test jobs and publishes this package from main.
+    # npm trusted publishing only accepts OIDC from GitHub-hosted runners.
+    runs-on: ubuntu-latest
+    needs: [serverless, publish]
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name == 'push' && needs.serverless.result == 'success' && needs.publish.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && needs.serverless.result == 'skipped' && needs.publish.result == 'skipped')
+      )
+    permissions:
+      contents: write
+      id-token: write
+    defaults:
+      run:
+        working-directory: ./sdks/typescript-serverless
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          check-latest: true
+          node-version: "24.x"
+
+      - name: Install pnpm
+        run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" npm install -g pnpm@10.16.1
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('sdks/typescript/pnpm-lock.yaml', 'sdks/typescript-serverless/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Build the SDK dist the package links
+        working-directory: ./sdks/typescript
+        run: |
+          sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+          pnpm tsc:build
+          pnpm prepublish
+
+      - name: Install dependencies
+        run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+
+      - name: Build and publish the package
+        run: |
+          VERSION=$(jq -r '.version' package.json)
+
+          # The exact version, not the `latest` tag: an alpha published under its own tag or
+          # a `latest` that moved on must not trigger a republish. A registry or auth failure
+          # fails the job instead of passing for "not published".
+          if LOOKUP=$(pnpm view "@hatchet-dev/serverless@$VERSION" version 2>&1); then
+            echo "Version $VERSION is already published ($LOOKUP). Skipping publish."
+            exit 0
+          elif ! grep -q "E404" <<<"$LOOKUP"; then
+            echo "Could not check npm for @hatchet-dev/serverless@$VERSION:"
+            echo "$LOOKUP"
+            exit 1
+          fi
+
+          if [[ "$VERSION" == *alpha* ]]; then
+            pnpm publish:ci:alpha
+          else
+            pnpm publish:ci
+          fi
+          echo "VERSION_TAG=$VERSION" >> $GITHUB_ENV
+
+      - name: "Generate release notes"
+        if: env.VERSION_TAG != ''
+        working-directory: ${{ github.workspace }}
+        run: ./hack/ci/release-notes.sh serverless > ./release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Release"
+        if: env.VERSION_TAG != ''
+        working-directory: ${{ github.workspace }}
+        run: |
+          gh release create "serverless/${VERSION_TAG}" \
+            --target "$GITHUB_SHA" \
+            --title "Serverless package ${VERSION_TAG}" \
+            --notes-file ./release_notes.md \
+            --latest=false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-sandbox:
+    # @hatchet-dev/sandbox declares the SDK as a peer, so it publishes after the SDK's own
+    # publish job and only when its version is not on npm yet. A manual run skips the test
+    # jobs and publishes this package from main.
+    # npm trusted publishing only accepts OIDC from GitHub-hosted runners.
+    runs-on: ubuntu-latest
+    needs: [sandbox, publish]
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name == 'push' && needs.sandbox.result == 'success' && needs.publish.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && needs.sandbox.result == 'skipped' && needs.publish.result == 'skipped')
+      )
+    permissions:
+      contents: write
+      id-token: write
+    defaults:
+      run:
+        working-directory: ./sdks/typescript-sandbox
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          check-latest: true
+          node-version: "24.x"
+
+      - name: Install pnpm
+        run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" npm install -g pnpm@10.16.1
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('sdks/typescript/pnpm-lock.yaml', 'sdks/typescript-sandbox/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Build the SDK dist the package links
+        working-directory: ./sdks/typescript
+        run: |
+          sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+          pnpm tsc:build
+          pnpm prepublish
+
+      - name: Install dependencies
+        run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+
+      - name: Build and publish the package
+        run: |
+          VERSION=$(jq -r '.version' package.json)
+
+          # The exact version, not the `latest` tag: an alpha published under its own tag or
+          # a `latest` that moved on must not trigger a republish. A registry or auth failure
+          # fails the job instead of passing for "not published".
+          if LOOKUP=$(pnpm view "@hatchet-dev/sandbox@$VERSION" version 2>&1); then
+            echo "Version $VERSION is already published ($LOOKUP). Skipping publish."
+            exit 0
+          elif ! grep -q "E404" <<<"$LOOKUP"; then
+            echo "Could not check npm for @hatchet-dev/sandbox@$VERSION:"
+            echo "$LOOKUP"
+            exit 1
+          fi
+
+          if [[ "$VERSION" == *alpha* ]]; then
+            pnpm publish:ci:alpha
+          else
+            pnpm publish:ci
+          fi
+          echo "VERSION_TAG=$VERSION" >> $GITHUB_ENV
+
+      - name: "Generate release notes"
+        if: env.VERSION_TAG != ''
+        working-directory: ${{ github.workspace }}
+        run: ./hack/ci/release-notes.sh sandbox > ./release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Release"
+        if: env.VERSION_TAG != ''
+        working-directory: ${{ github.workspace }}
+        run: |
+          gh release create "sandbox/${VERSION_TAG}" \
+            --target "$GITHUB_SHA" \
+            --title "Sandbox package ${VERSION_TAG}" \
+            --notes-file ./release_notes.md \
+            --latest=false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-pi-durable:
+    # @hatchet-dev/pi-durable declares the SDK and @hatchet-dev/sandbox as peers, so it publishes
+    # after both of their publish jobs and only when its version is not on npm yet. A manual run skips the test
+    # jobs and publishes this package from main.
+    # npm trusted publishing only accepts OIDC from GitHub-hosted runners.
+    runs-on: ubuntu-latest
+    needs: [pi-durable, pi-durable-e2e, publish, publish-sandbox]
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name == 'push' && needs.pi-durable.result == 'success' && needs.pi-durable-e2e.result == 'success' && needs.publish.result == 'success' && needs.publish-sandbox.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && needs.pi-durable.result == 'skipped' && needs.pi-durable-e2e.result == 'skipped' && needs.publish.result == 'skipped' && needs.publish-sandbox.result == 'success')
+      )
+    permissions:
+      contents: write
+      id-token: write
+    defaults:
+      run:
+        working-directory: ./sdks/typescript-pi-durable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          check-latest: true
+          node-version: "24.x"
+
+      - name: Install pnpm
+        run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" npm install -g pnpm@10.16.1
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('sdks/typescript/pnpm-lock.yaml', 'sdks/typescript-sandbox/pnpm-lock.yaml', 'sdks/typescript-pi-durable/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Build the SDK dist the package links
+        working-directory: ./sdks/typescript
+        run: |
+          sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+          pnpm tsc:build
+          pnpm prepublish
+
+      - name: Build the sandbox package the package links
+        working-directory: ./sdks/typescript-sandbox
+        run: |
+          sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Install dependencies
+        run: sh "${GITHUB_WORKSPACE:?}/hack/ci/retry.sh" pnpm install --frozen-lockfile
+
+      - name: Build and publish the package
+        run: |
+          VERSION=$(jq -r '.version' package.json)
+
+          # The exact version, not the `latest` tag: an alpha published under its own tag or
+          # a `latest` that moved on must not trigger a republish. A registry or auth failure
+          # fails the job instead of passing for "not published".
+          if LOOKUP=$(pnpm view "@hatchet-dev/pi-durable@$VERSION" version 2>&1); then
+            echo "Version $VERSION is already published ($LOOKUP). Skipping publish."
+            exit 0
+          elif ! grep -q "E404" <<<"$LOOKUP"; then
+            echo "Could not check npm for @hatchet-dev/pi-durable@$VERSION:"
+            echo "$LOOKUP"
+            exit 1
+          fi
+
+          if [[ "$VERSION" == *alpha* ]]; then
+            pnpm publish:ci:alpha
+          else
+            pnpm publish:ci
+          fi
+          echo "VERSION_TAG=$VERSION" >> $GITHUB_ENV
+
+      - name: "Generate release notes"
+        if: env.VERSION_TAG != ''
+        working-directory: ${{ github.workspace }}
+        run: ./hack/ci/release-notes.sh pi-durable > ./release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Release"
+        if: env.VERSION_TAG != ''
+        working-directory: ${{ github.workspace }}
+        run: |
+          gh release create "pi-durable/${VERSION_TAG}" \
+            --target "$GITHUB_SHA" \
+            --title "pi-durable package ${VERSION_TAG}" \
             --notes-file ./release_notes.md \
             --latest=false
         env:

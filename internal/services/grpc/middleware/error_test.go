@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,11 +12,13 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	v1contracts "github.com/hatchet-dev/hatchet/internal/services/shared/proto/v1"
+	"github.com/hatchet-dev/hatchet/pkg/repository/fairpool"
 )
 
 type countingAlerter struct {
@@ -60,6 +63,25 @@ func TestErrorInterceptorMapsNoRowsToNotFound(t *testing.T) {
 	assert.Equal(t, 0, alerter.n)
 }
 
+func TestErrorInterceptorMapsLimitErrorToResourceExhaustedWithRetryInfo(t *testing.T) {
+	err, alerter := runThroughErrorInterceptor(t, fmt.Errorf("trigger: %w", &fairpool.LimitError{Key: "shared", Limit: 2}))
+
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	assert.Equal(t, 0, alerter.n)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	require.Len(t, connectErr.Details(), 1)
+
+	detail, valueErr := connectErr.Details()[0].Value()
+	require.NoError(t, valueErr)
+
+	retryInfo, ok := detail.(*errdetails.RetryInfo)
+	require.True(t, ok, "detail is %T", detail)
+	assert.Equal(t, fairpool.RetryAfter, retryInfo.GetRetryDelay().AsDuration())
+}
+
 func TestErrorInterceptorMapsCanceledWithoutAlert(t *testing.T) {
 	err, alerter := runThroughErrorInterceptor(t, context.Canceled)
 
@@ -75,6 +97,91 @@ func TestErrorInterceptorUnknownStillInternalAndAlerts(t *testing.T) {
 	assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
 	assert.NotContains(t, err.Error(), "boom")
 	assert.Equal(t, 1, alerter.n)
+}
+
+func TestErrorInterceptorLogsWrappedCauseWithoutExposingIt(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "unary"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			var logs bytes.Buffer
+			l := zerolog.New(&logs)
+			alerter := &countingAlerter{}
+			interceptor := NewErrorInterceptor(alerter, &l).Interceptor()
+			cause := fmt.Errorf("failed to ingest memo event: %w", errors.New("private database failure"))
+
+			var err error
+			if streaming {
+				err = interceptor.WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+					return cause
+				})(context.Background(), stubHandlerConn{})
+			} else {
+				_, err = interceptor.WrapUnary(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+					return nil, cause
+				})(context.Background(), connect.NewRequest(&struct{}{}))
+			}
+
+			require.Error(t, err)
+			assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+			assert.NotContains(t, err.Error(), "private database failure")
+			assert.NotContains(t, err.Error(), "failed to ingest memo event")
+			assert.Contains(t, logs.String(), cause.Error())
+			assert.Equal(t, 1, alerter.n)
+		})
+	}
+}
+
+func TestErrorInterceptorRedactsCodedServerFailures(t *testing.T) {
+	for _, code := range []connect.Code{connect.CodeUnknown, connect.CodeInternal, connect.CodeDataLoss, connect.CodeUnavailable, connect.CodeAborted, connect.CodeDeadlineExceeded, connect.CodeCanceled} {
+		for _, grpcStatus := range []bool{false, true} {
+			for _, streaming := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/grpc=%t/streaming=%t", code, grpcStatus, streaming), func(t *testing.T) {
+					debug := &errdetails.DebugInfo{Detail: "private stack marker"}
+					var cause error
+					if grpcStatus {
+						st, err := status.New(codes.Code(code), "private backend marker").WithDetails(debug)
+						require.NoError(t, err)
+						cause = st.Err()
+					} else {
+						coded := connect.NewError(code, errors.New("private backend marker"))
+						detail, err := connect.NewErrorDetail(debug)
+						require.NoError(t, err)
+						coded.AddDetail(detail)
+						coded.Meta().Set("X-Debug", "private header marker")
+						cause = coded
+					}
+					cause = fmt.Errorf("private operation context: %w", cause)
+					var logs bytes.Buffer
+					l := zerolog.New(&logs)
+					interceptor := NewErrorInterceptor(&countingAlerter{}, &l).Interceptor()
+					var err error
+					if streaming {
+						err = interceptor.WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+							return cause
+						})(context.Background(), stubHandlerConn{})
+					} else {
+						_, err = interceptor.WrapUnary(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+							return nil, cause
+						})(context.Background(), connect.NewRequest(&struct{}{}))
+					}
+					wantCode := code
+					if code == connect.CodeUnknown {
+						wantCode = connect.CodeInternal
+					}
+					var coded *connect.Error
+					require.ErrorAs(t, err, &coded)
+					assert.Equal(t, wantCode, coded.Code())
+					assert.NotContains(t, coded.Message(), "private")
+					assert.Empty(t, coded.Details())
+					assert.Empty(t, coded.Meta())
+					assert.Contains(t, logs.String(), "private backend marker")
+					assert.Contains(t, logs.String(), "private operation context")
+				})
+			}
+		}
+	}
 }
 
 func TestErrorInterceptorPassesThroughExistingCode(t *testing.T) {

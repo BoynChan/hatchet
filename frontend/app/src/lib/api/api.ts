@@ -1,11 +1,13 @@
 import { inferControlPlaneEnabled } from './control-plane-status';
 import {
   ExchangeTokenFetchError,
+  exchangeTokenIsUsable,
   exchangeTokenQueryOptions,
 } from './exchange-token';
 import { Api } from './generated/Api';
 import { Api as CloudApi } from './generated/cloud/Api';
 import { Api as ControlPlaneApi } from './generated/control-plane/Api';
+import { config } from '@/config';
 import { isRetryableRequestError } from '@/lib/query-retry';
 import queryClient from '@/query-client';
 import { InternalAxiosRequestConfig } from 'axios';
@@ -39,7 +41,8 @@ declare module 'axios' {
   interface AxiosRequestConfig {
     xResources?: string[];
     // Explicitly identifies which tenant's exchange token should be used.
-    // When set, the interceptor skips the localStorage fallback.
+    // When set, the interceptor skips the request-path, location, and
+    // localStorage lookups.
     xTenantId?: string;
     // Forces the exchange token interceptor to run even for non-tenant-scoped
     // endpoints (e.g. /api/v1/billing/plans).
@@ -73,6 +76,29 @@ export const controlPlaneApi = new ControlPlaneApi({
   paramsSerializer: (params) => qs.stringify(params, { arrayFormat: 'repeat' }),
   timeout: CONTROL_PLANE_REQUEST_TIMEOUT_MS,
 });
+
+export function isMfaRequiredResponse(data: unknown): boolean {
+  if (!data || typeof data !== 'object') {
+    return false;
+  }
+  const body = data as { code?: unknown; message?: unknown };
+  return body.code === 'mfa_required' || body.message === 'mfa_required';
+}
+
+// Pending primary logins have no access to user or tenant resources.
+controlPlaneApi.instance.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const target = `${config.BASE_PATH.replace(/\/$/, '')}/auth/mfa`;
+    if (
+      isMfaRequiredResponse(error.response?.data) &&
+      window.location.pathname !== target
+    ) {
+      window.location.assign(target);
+    }
+    return Promise.reject(error);
+  },
+);
 
 export const SELF_HOSTED_LIST_TIMEOUT_MS =
   api.instance.defaults.timeout || 30_000;
@@ -124,10 +150,27 @@ export function readTenantIdFromLocation(): string | null {
   return readTenantIdFromPathname(window.location.pathname);
 }
 
+function readTenantIdFromRequestUrl(url: string | undefined): string | null {
+  if (!url) {
+    return null;
+  }
+
+  return readTenantIdFromPathname(url.split(/[?#]/, 1)[0]);
+}
+
+// The API rejects an exchange token whose tenant differs from the tenant in
+// the request path, so the path is authoritative whenever it names one. The
+// page location and storage can point at a different tenant than the request,
+// e.g. while a tenant switch is still loading.
 export function resolveExchangeTokenTenantId(
-  config: Pick<InternalAxiosRequestConfig, 'xTenantId'>,
+  config: Pick<InternalAxiosRequestConfig, 'xTenantId' | 'url'>,
 ): string | null {
-  return config.xTenantId ?? readTenantIdFromLocation() ?? readStoredTenantId();
+  return (
+    config.xTenantId ??
+    readTenantIdFromRequestUrl(config.url) ??
+    readTenantIdFromLocation() ??
+    readStoredTenantId()
+  );
 }
 
 const CONTROL_PLANE_META_QUERY_KEY = ['control-plane-metadata:get'] as const;
@@ -222,7 +265,8 @@ export async function exchangeTokenInterceptor(
 
   // xTenantId takes precedence — callers that intentionally target a tenant
   // other than the current page tenant set it explicitly. Otherwise the
-  // interceptor uses the tenant encoded in window.location, then storage.
+  // interceptor uses the tenant in the request path, then the one encoded in
+  // window.location, then storage.
   const tenantId = resolveExchangeTokenTenantId(config);
 
   if (!cpEnabled) {
@@ -233,11 +277,17 @@ export async function exchangeTokenInterceptor(
   }
 
   try {
-    const exchangeToken = await queryClient.fetchQuery(
-      exchangeTokenQueryOptions(tenantId, () =>
-        controlPlaneApi.exchangeTokenCreate(tenantId).then((r) => r.data),
-      ),
+    const options = exchangeTokenQueryOptions(tenantId, () =>
+      controlPlaneApi.exchangeTokenCreate(tenantId).then((r) => r.data),
     );
+    let exchangeToken = await queryClient.fetchQuery(options);
+
+    // A token fetch that was in flight while the tab was frozen resolves to
+    // every waiter with no expiry check. The cache marks that token stale on
+    // arrival, so asking once more mints a new one.
+    if (!exchangeTokenIsUsable(exchangeToken.expiresAt)) {
+      exchangeToken = await queryClient.fetchQuery(options);
+    }
 
     config.baseURL = exchangeToken.apiUrl;
     config.withCredentials = false;

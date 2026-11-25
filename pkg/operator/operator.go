@@ -62,6 +62,23 @@ type DAGStepTriggerRequest struct {
 	ParentReExecuted bool
 }
 
+type DAGStepCELFailureError struct {
+	ActionId string
+	Message  string
+}
+
+func (e *DAGStepCELFailureError) Error() string {
+	return fmt.Sprintf("dag step trigger for %q did not create its child run: %s", e.ActionId, e.Message)
+}
+
+type DAGStepLogEntryMismatchError struct {
+	ActionId string
+}
+
+func (e *DAGStepLogEntryMismatchError) Error() string {
+	return fmt.Sprintf("no durable log entry returned for dag step %s", e.ActionId)
+}
+
 type DAGStepTriggerResult struct {
 	NodeId                int64
 	BranchId              int64
@@ -72,8 +89,8 @@ type DAGStepTriggerResult struct {
 	IsFailure     bool
 	ErrorMessage  *string
 
-	// ReExecuted is true when the step actually runs this invocation rather than being
-	// satisfied from the log.
+	// ReExecuted is true when the step's entry is on the log's current branch, i.e. it ran as
+	// part of the current replay rather than being a cached result from an earlier branch.
 	ReExecuted bool
 }
 
@@ -89,7 +106,10 @@ type TaskEventWriter interface {
 	// on the gRPC surface: an out-of-process operator has no equivalent.
 	CancelTaskWithReason(ctx context.Context, tenantId uuid.UUID, request *contracts.StepActionEvent) (*contracts.ActionEventResponse, error)
 
-	TriggerDAGStep(ctx context.Context, tenantId uuid.UUID, req *DAGStepTriggerRequest) (*DAGStepTriggerResult, error)
+	// TriggerDAGSteps triggers one orchestrator's ready steps in a single durable log append and
+	// trigger transaction. Every request names the same orchestrator and invocation; results are
+	// returned in request order.
+	TriggerDAGSteps(ctx context.Context, tenantId uuid.UUID, reqs []*DAGStepTriggerRequest) ([]*DAGStepTriggerResult, error)
 
 	// CancelDAGChildren cancels already-triggered children when the orchestrator is cancelled.
 	CancelDAGChildren(ctx context.Context, tenantId uuid.UUID, taskExternalIds []uuid.UUID) error
@@ -247,12 +267,12 @@ func (s *SharedOperator[T]) UpdateWorkerActions(ctx context.Context, actions []s
 	return true, nil
 }
 
-func (s *SharedOperator[T]) TriggerDAGStep(ctx context.Context, req *DAGStepTriggerRequest) (*DAGStepTriggerResult, error) {
+func (s *SharedOperator[T]) TriggerDAGSteps(ctx context.Context, reqs []*DAGStepTriggerRequest) ([]*DAGStepTriggerResult, error) {
 	if s.taskEventWriter == nil {
 		return nil, fmt.Errorf("operator has no task event writer configured")
 	}
 
-	return s.taskEventWriter.TriggerDAGStep(ctx, s.tenantId, req)
+	return s.taskEventWriter.TriggerDAGSteps(ctx, s.tenantId, reqs)
 }
 
 func (s *SharedOperator[T]) CancelDAGChildren(ctx context.Context, taskExternalIds []uuid.UUID) error {

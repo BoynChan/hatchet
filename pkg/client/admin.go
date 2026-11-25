@@ -24,6 +24,7 @@ import (
 	"github.com/hatchet-dev/hatchet/pkg/client/rest"
 	"github.com/hatchet-dev/hatchet/pkg/client/types"
 	"github.com/hatchet-dev/hatchet/pkg/config/client"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	"github.com/hatchet-dev/hatchet/pkg/validator"
 )
 
@@ -126,15 +127,15 @@ type WorkflowRun struct {
 func taskStatusFromProto(s v1contracts.RunStatus) rest.V1TaskStatus {
 	switch s {
 	case v1contracts.RunStatus_COMPLETED:
-		return rest.V1TaskStatusCOMPLETED
+		return enums.V1TaskStatusCOMPLETED
 	case v1contracts.RunStatus_CANCELLED:
-		return rest.V1TaskStatusCANCELLED
+		return enums.V1TaskStatusCANCELLED
 	case v1contracts.RunStatus_FAILED:
-		return rest.V1TaskStatusFAILED
+		return enums.V1TaskStatusFAILED
 	case v1contracts.RunStatus_RUNNING:
-		return rest.V1TaskStatusRUNNING
+		return enums.V1TaskStatusRUNNING
 	default:
-		return rest.V1TaskStatusQUEUED
+		return enums.V1TaskStatusQUEUED
 	}
 }
 
@@ -176,6 +177,9 @@ type AdminClient interface {
 	RunChildWorkflows(workflows []*RunChildWorkflowsOpts) ([]string, error)
 
 	PutRateLimit(key string, opts *types.RateLimitOpts) error
+
+	// PauseRateLimit returns the time the key is paused until, which is later than until if the key was already paused for longer
+	PauseRateLimit(ctx context.Context, key string, until time.Time) (time.Time, error)
 
 	GetRunDetails(ctx context.Context, externalId uuid.UUID) (*RunDetails, error)
 }
@@ -721,6 +725,19 @@ func (a *adminClientImpl) PutRateLimit(key string, opts *types.RateLimitOpts) er
 	}
 
 	return nil
+}
+
+func (a *adminClientImpl) PauseRateLimit(ctx context.Context, key string, until time.Time) (time.Time, error) {
+	resp, err := a.client.PauseRateLimit(a.ctx.newContext(ctx), &admincontracts.PauseRateLimitRequest{
+		Key:         key,
+		PausedUntil: timestamppb.New(until),
+	})
+
+	if err != nil {
+		return time.Time{}, fmt.Errorf("could not pause rate limit: %w", err)
+	}
+
+	return resp.PausedUntil.AsTime(), nil
 }
 
 func (a *adminClientImpl) GetRunDetails(ctx context.Context, externalId uuid.UUID) (*RunDetails, error) {

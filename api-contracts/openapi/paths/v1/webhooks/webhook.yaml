@@ -4,7 +4,6 @@ V1WebhookGetDeleteReceiveUpdate:
     description: Get a webhook by its name
     operationId: v1-webhook:get
     x-payloads: false
-    x-enable-rate-limiting: true
     parameters:
       - description: The tenant id
         in: path
@@ -40,6 +39,8 @@ V1WebhookGetDeleteReceiveUpdate:
             schema:
               $ref: "../../../components/schemas/_index.yaml#/APIErrors"
         description: Forbidden
+      "429":
+        $ref: "../../../components/responses/_index.yaml#/TooManyRequests"
     summary: Get a webhook
     tags:
       - Webhook
@@ -89,6 +90,8 @@ V1WebhookGetDeleteReceiveUpdate:
             schema:
               $ref: "../../../components/schemas/_index.yaml#/APIErrors"
         description: Not found
+      "429":
+        $ref: "../../../components/responses/_index.yaml#/TooManyRequests"
     summary: Delete a webhook
     tags:
       - Webhook
@@ -206,6 +209,8 @@ V1WebhookGetDeleteReceiveUpdate:
             schema:
               $ref: "../../../components/schemas/_index.yaml#/APIErrors"
         description: Not found
+      "429":
+        $ref: "../../../components/responses/_index.yaml#/TooManyRequests"
     summary: Update a webhook
     tags:
       - Webhook
@@ -277,6 +282,8 @@ V1WebhookListCreate:
             schema:
               $ref: "../../../components/schemas/_index.yaml#/APIErrors"
         description: Forbidden
+      "429":
+        $ref: "../../../components/responses/_index.yaml#/TooManyRequests"
     summary: List webhooks
     tags:
       - Webhook
@@ -327,6 +334,8 @@ V1WebhookListCreate:
             schema:
               $ref: "../../../components/schemas/_index.yaml#/APIErrors"
         description: Not found
+      "429":
+        $ref: "../../../components/responses/_index.yaml#/TooManyRequests"
     summary: Create a webhook
     tags:
       - Webhook

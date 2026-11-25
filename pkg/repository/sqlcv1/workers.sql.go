@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -123,13 +124,24 @@ WHERE
     workers."tenantId" = $1
     AND (
         COALESCE($2::boolean, FALSE)
-        OR NOT EXISTS (
-            -- hide dag operators
-            SELECT 1
-            FROM v1_operator op
-            WHERE
-                op.id = workers."operatorId"
-                AND op.kind = 'DAG'
+        OR (
+            NOT EXISTS (
+                -- hide dag operators
+                SELECT 1
+                FROM v1_operator op
+                WHERE
+                    op.id = workers."operatorId"
+                    AND op.kind = 'DAG'
+            )
+            AND NOT EXISTS (
+                -- hide the serverless operator's workers, which carry its process label
+                -- (workerLabelProcess in pkg/serverlessoperator)
+                SELECT 1
+                FROM "WorkerLabel" wl
+                WHERE
+                    wl."workerId" = workers."id"
+                    AND wl."key" = 'hatchet-serverless-process'
+            )
         )
     )
     AND (
@@ -259,19 +271,19 @@ INSERT INTO "Worker" (
 `
 
 type CreateWorkerParams struct {
-	Tenantid            uuid.UUID      `json:"tenantid"`
-	Name                string         `json:"name"`
-	Dispatcherid        uuid.UUID      `json:"dispatcherid"`
-	Type                NullWorkerType `json:"type"`
-	SdkVersion          pgtype.Text    `json:"sdkVersion"`
-	Language            NullWorkerSDKS `json:"language"`
-	LanguageVersion     pgtype.Text    `json:"languageVersion"`
-	Os                  pgtype.Text    `json:"os"`
-	RuntimeExtra        pgtype.Text    `json:"runtimeExtra"`
-	Actionhash          []byte         `json:"actionhash"`
-	Operatoractioncount int32          `json:"operatoractioncount"`
-	OperatorId          *uuid.UUID     `json:"operatorId"`
-	Isexemptfromlimits  bool           `json:"isexemptfromlimits"`
+	Tenantid            uuid.UUID         `json:"tenantid"`
+	Name                string            `json:"name"`
+	Dispatcherid        uuid.UUID         `json:"dispatcherid"`
+	Type                *enums.WorkerType `json:"type"`
+	SdkVersion          pgtype.Text       `json:"sdkVersion"`
+	Language            NullWorkerSDKS    `json:"language"`
+	LanguageVersion     pgtype.Text       `json:"languageVersion"`
+	Os                  pgtype.Text       `json:"os"`
+	RuntimeExtra        pgtype.Text       `json:"runtimeExtra"`
+	Actionhash          []byte            `json:"actionhash"`
+	Operatoractioncount int32             `json:"operatoractioncount"`
+	OperatorId          *uuid.UUID        `json:"operatorId"`
+	Isexemptfromlimits  bool              `json:"isexemptfromlimits"`
 }
 
 func (q *Queries) CreateWorker(ctx context.Context, db DBTX, arg CreateWorkerParams) (*Worker, error) {
@@ -522,6 +534,27 @@ func (q *Queries) GetActiveWorkerById(ctx context.Context, db DBTX, arg GetActiv
 		&i.RemainingSlots,
 	)
 	return &i, err
+}
+
+const getTotalActiveSlotsForTenant = `-- name: GetTotalActiveSlotsForTenant :one
+SELECT
+    COALESCE(SUM(wc.max_units), 0)::bigint AS "totalActiveSlots"
+FROM v1_worker_slot_config wc
+JOIN "Worker" w ON w."id" = wc.worker_id AND w."tenantId" = wc.tenant_id
+WHERE
+    wc.tenant_id = $1::uuid
+    AND w."dispatcherId" IS NOT NULL
+    AND w."lastHeartbeatAt" > NOW() - INTERVAL '5 seconds'
+    AND w."isActive" = true
+    AND w."isPaused" = false
+    AND NOT w."isExemptFromLimits"
+`
+
+func (q *Queries) GetTotalActiveSlotsForTenant(ctx context.Context, db DBTX, tenantid uuid.UUID) (int64, error) {
+	row := db.QueryRow(ctx, getTotalActiveSlotsForTenant, tenantid)
+	var totalActiveSlots int64
+	err := row.Scan(&totalActiveSlots)
+	return totalActiveSlots, err
 }
 
 const getWorkerActionsByWorkerActionHash = `-- name: GetWorkerActionsByWorkerActionHash :many
@@ -1410,7 +1443,7 @@ func (q *Queries) ListManyWorkerLabels(ctx context.Context, db DBTX, workerids [
 
 const listSemaphoreSlotsWithStateForWorker = `-- name: ListSemaphoreSlotsWithStateForWorker :many
 SELECT
-    task_id, task_inserted_at, runtime.retry_count, worker_id, batch_id, batch_size, batch_index, runtime.batch_key, runtime.tenant_id, timeout_at, evicted_at, assigned_at, acked_at, id, inserted_at, v1_task.tenant_id, queue, action_id, step_id, step_readable_id, workflow_id, workflow_version_id, workflow_run_id, schedule_timeout, step_timeout, priority, sticky, desired_worker_id, external_id, display_name, input, v1_task.retry_count, internal_retry_count, app_retry_count, step_index, additional_metadata, dag_id, dag_inserted_at, parent_task_external_id, parent_task_id, parent_task_inserted_at, child_index, child_key, initial_state, initial_state_reason, concurrency_parent_strategy_ids, concurrency_strategy_ids, concurrency_keys, v1_task.batch_key, retry_backoff_factor, retry_max_backoff, is_durable, desired_worker_label, triggering_event_external_id, triggering_event_key, idempotency_key, is_dag_orchestrator, concurrency_max_runs
+    task_id, task_inserted_at, runtime.retry_count, worker_id, batch_id, batch_size, batch_index, runtime.batch_key, runtime.tenant_id, timeout_at, evicted_at, assigned_at, acked_at, id, inserted_at, v1_task.tenant_id, queue, action_id, step_id, step_readable_id, workflow_id, workflow_version_id, workflow_run_id, schedule_timeout, step_timeout, priority, sticky, desired_worker_id, external_id, display_name, input, v1_task.retry_count, internal_retry_count, app_retry_count, step_index, additional_metadata, dag_id, dag_inserted_at, parent_task_external_id, parent_task_id, parent_task_inserted_at, child_index, child_key, initial_state, initial_state_reason, concurrency_parent_strategy_ids, concurrency_strategy_ids, concurrency_keys, v1_task.batch_key, retry_backoff_factor, retry_max_backoff, is_durable, desired_worker_label, triggering_event_external_id, triggering_event_key, idempotency_key, is_dag_orchestrator, concurrency_max_runs, payload_reference_id, triggers, dag_parent_task_run_ids, child_task_desired_worker_labels, task_input_payload_version
 FROM
     v1_task_runtime runtime
 JOIN
@@ -1487,6 +1520,11 @@ type ListSemaphoreSlotsWithStateForWorkerRow struct {
 	IdempotencyKey               pgtype.Text        `json:"idempotency_key"`
 	IsDagOrchestrator            bool               `json:"is_dag_orchestrator"`
 	ConcurrencyMaxRuns           []pgtype.Int4      `json:"concurrency_max_runs"`
+	PayloadReferenceID           *uuid.UUID         `json:"payload_reference_id"`
+	Triggers                     []byte             `json:"triggers"`
+	DagParentTaskRunIds          []uuid.UUID        `json:"dag_parent_task_run_ids"`
+	ChildTaskDesiredWorkerLabels []byte             `json:"child_task_desired_worker_labels"`
+	TaskInputPayloadVersion      int16              `json:"task_input_payload_version"`
 }
 
 func (q *Queries) ListSemaphoreSlotsWithStateForWorker(ctx context.Context, db DBTX, arg ListSemaphoreSlotsWithStateForWorkerParams) ([]*ListSemaphoreSlotsWithStateForWorkerRow, error) {
@@ -1557,6 +1595,11 @@ func (q *Queries) ListSemaphoreSlotsWithStateForWorker(ctx context.Context, db D
 			&i.IdempotencyKey,
 			&i.IsDagOrchestrator,
 			&i.ConcurrencyMaxRuns,
+			&i.PayloadReferenceID,
+			&i.Triggers,
+			&i.DagParentTaskRunIds,
+			&i.ChildTaskDesiredWorkerLabels,
+			&i.TaskInputPayloadVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -1714,13 +1757,24 @@ WHERE
     workers."tenantId" = $1
     AND (
         COALESCE($2::boolean, FALSE)
-        OR NOT EXISTS (
-            -- hide dag operators
-            SELECT 1
-            FROM v1_operator op
-            WHERE
-                op.id = workers."operatorId"
-                AND op.kind = 'DAG'
+        OR (
+            NOT EXISTS (
+                -- hide dag operators
+                SELECT 1
+                FROM v1_operator op
+                WHERE
+                    op.id = workers."operatorId"
+                    AND op.kind = 'DAG'
+            )
+            AND NOT EXISTS (
+                -- hide the serverless operator's workers, which carry its process label
+                -- (workerLabelProcess in pkg/serverlessoperator)
+                SELECT 1
+                FROM "WorkerLabel" wl
+                WHERE
+                    wl."workerId" = workers."id"
+                    AND wl."key" = 'hatchet-serverless-process'
+            )
         )
     )
     AND (
@@ -1861,6 +1915,58 @@ func (q *Queries) ListWorkers(ctx context.Context, db DBTX, arg ListWorkersParam
 	return items, nil
 }
 
+const lockDeadOperatorWorkers = `-- name: LockDeadOperatorWorkers :many
+SELECT w."id"
+FROM "Worker" w
+WHERE
+    w."tenantId" = $1::uuid
+    AND w."operatorId" = $2::uuid
+    AND w."id" <> $3::uuid
+    AND (w."isActive" OR w."operatorActionCount" > 0)
+    AND NOT (
+        w."isActive"
+        AND EXISTS (
+            SELECT 1
+            FROM "Dispatcher" d
+            WHERE
+                d."id" = w."dispatcherId"
+                AND d."isActive" = TRUE
+                AND d."lastHeartbeatAt" > NOW() - INTERVAL '15 seconds'
+        )
+    )
+ORDER BY w."id"
+FOR UPDATE
+`
+
+type LockDeadOperatorWorkersParams struct {
+	Tenantid     uuid.UUID `json:"tenantid"`
+	Operatorid   uuid.UUID `json:"operatorid"`
+	Keepworkerid uuid.UUID `json:"keepworkerid"`
+}
+
+// The operator's workers, other than @keepWorkerId, that no longer serve it but still hold links
+// or count as active. Locked in id order, so concurrent releases of one operator queue instead of
+// deadlocking, and a delta still in flight on one of them commits before its links are released.
+func (q *Queries) LockDeadOperatorWorkers(ctx context.Context, db DBTX, arg LockDeadOperatorWorkersParams) ([]uuid.UUID, error) {
+	rows, err := db.Query(ctx, lockDeadOperatorWorkers, arg.Tenantid, arg.Operatorid, arg.Keepworkerid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockWorkerActionHash = `-- name: LockWorkerActionHash :one
 SELECT "actionHash"
 FROM "Worker"
@@ -1936,6 +2042,42 @@ WHERE w."id" = $1::uuid
 func (q *Queries) RefreshWorkerActionHash(ctx context.Context, db DBTX, workerid uuid.UUID) error {
 	_, err := db.Exec(ctx, refreshWorkerActionHash, workerid)
 	return err
+}
+
+const releaseWorkers = `-- name: ReleaseWorkers :one
+WITH unlinked AS (
+    DELETE FROM "_ActionToWorker" aw
+    USING "Worker" w
+    WHERE
+        aw."B" = w."id"
+        AND w."id" = ANY($1::uuid[])
+        AND w."tenantId" = $2::uuid
+    RETURNING aw."A"
+), released AS (
+    UPDATE "Worker" w
+    SET
+        "operatorActionCount" = 0,
+        "actionHash" = NULL,
+        "isActive" = FALSE
+    WHERE
+        w."id" = ANY($1::uuid[])
+        AND w."tenantId" = $2::uuid
+)
+SELECT count(*)::bigint AS released FROM unlinked
+`
+
+type ReleaseWorkersParams struct {
+	Workerids []uuid.UUID `json:"workerids"`
+	Tenantid  uuid.UUID   `json:"tenantid"`
+}
+
+// Unlinks every action from the workers, zeroes their link counts and marks them inactive, so
+// they no longer count against their operator's action budget or hold the operator.
+func (q *Queries) ReleaseWorkers(ctx context.Context, db DBTX, arg ReleaseWorkersParams) (int64, error) {
+	row := db.QueryRow(ctx, releaseWorkers, arg.Workerids, arg.Tenantid)
+	var released int64
+	err := row.Scan(&released)
+	return released, err
 }
 
 const settleWorkerActionsDelta = `-- name: SettleWorkerActionsDelta :one

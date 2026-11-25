@@ -91,7 +91,7 @@ module Hatchet
           request = ::V1::TriggerWorkflowRequest.new(**request_args)
 
           begin
-            response = @v0_stub.trigger_workflow(request, metadata: @config.auth_metadata)
+            response = ServerRetryDelay.call { @v0_stub.trigger_workflow(request, metadata: @config.auth_metadata) }
             response.workflow_run_id
           rescue ::GRPC::AlreadyExists => e
             run_id = extract_idempotency_run_id(e)
@@ -152,7 +152,7 @@ module Hatchet
           begin
             requests.each_slice(BULK_TRIGGER_BATCH_SIZE) do |batch|
               bulk_request = ::BulkTriggerWorkflowRequest.new(workflows: batch)
-              response = @v0_stub.bulk_trigger_workflow(bulk_request, metadata: @config.auth_metadata)
+              response = ServerRetryDelay.call { @v0_stub.bulk_trigger_workflow(bulk_request, metadata: @config.auth_metadata) }
               all_run_ids.concat(response.workflow_run_ids.to_a)
             end
           rescue ::GRPC::AlreadyExists => e
@@ -248,6 +248,26 @@ module Hatchet
           )
 
           @v0_stub.put_rate_limit(request, metadata: @config.auth_metadata)
+        end
+
+        # Pause a rate limit key via v0 WorkflowService.
+        #
+        # @param key [String] Rendered rate limit key
+        # @param until_time [Time] Time to pause the key until
+        # @return [Time] The time the key is paused until
+        def pause_rate_limit(key:, until_time:)
+          ensure_connected!
+
+          until_time = until_time.to_time
+
+          request = ::PauseRateLimitRequest.new(
+            key: key,
+            paused_until: Google::Protobuf::Timestamp.new(seconds: until_time.to_i, nanos: until_time.nsec),
+          )
+
+          response = @v0_stub.pause_rate_limit(request, metadata: @config.auth_metadata)
+
+          Time.at(response.paused_until.seconds, response.paused_until.nanos, :nsec).utc
         end
 
         # Close the connection.

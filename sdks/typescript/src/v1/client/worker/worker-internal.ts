@@ -1,4 +1,5 @@
 import HatchetError from '@util/errors/hatchet-error';
+import { serializePayload } from '@hatchet/util/serialize-payload';
 import {
   TaskRunTerminatedError,
   isTaskRunTerminatedError,
@@ -250,7 +251,7 @@ export class InternalWorker {
       await registeredWorkflow;
       this.workflow_registry.push(workflow);
     } catch (e: any) {
-      throw new HatchetError(`Could not register workflow: ${e.message}`);
+      throw new HatchetError(`Could not register workflow: ${e.message}`, { cause: e });
     }
 
     this.registerActions(workflow);
@@ -288,11 +289,11 @@ export class InternalWorker {
           future.cancel(CancellationReason.EVICTED_BY_WORKER);
         }
       },
-      requestEvictionWithAck: async (key: ActionKey, rec: DurableRunRecord) => {
+      requestEvictionWithAck: async (key: ActionKey, rec: DurableRunRecord, reason: string) => {
         await this.client.durableListener.sendEvictInvocation(
           rec.taskRunExternalId,
           rec.invocationCount,
-          rec.evictionReason
+          reason
         );
       },
       logger: this.logger,
@@ -596,7 +597,7 @@ export class InternalWorker {
       actionId: action.actionId,
       eventTimestamp: new Date(),
       eventType,
-      eventPayload: JSON.stringify(payload),
+      eventPayload: serializePayload(payload),
       shouldNotRetry,
       retryCount,
     };
@@ -677,7 +678,7 @@ export class InternalWorker {
 
     Object.entries(result).forEach(([id, output]) => {
       try {
-        completedItems.push({ taskRunExternalId: id, eventPayload: JSON.stringify(output) });
+        completedItems.push({ taskRunExternalId: id, eventPayload: serializePayload(output) });
       } catch (e: any) {
         failedItems.push({
           taskRunExternalId: id,
@@ -871,6 +872,12 @@ export class InternalWorker {
       }
     }
 
+    // Snapshot before evicting: eviction cancels a waiting task's cancelable wrapper, and
+    // handleStartStepRun's `finally` removes it from `futures` while its underlying work is still
+    // winding down. Building the drain list afterwards would skip every task that was already
+    // waiting when shutdown began.
+    const inFlightWork = Object.values(this.futures).map(({ inner }) => inner);
+
     if (this.evictionManager) {
       try {
         const evicted = await this.evictionManager.evictAllWaiting();
@@ -882,19 +889,26 @@ export class InternalWorker {
       }
     }
 
+    this.logger.info('Gracefully exiting hatchet worker, running tasks will attempt to finish...');
+
+    // Awaits the underlying work rather than the cancelable wrapper, which rejects as soon as a
+    // cancellation arrives while the task is still winding down. Tasks assigned between the
+    // snapshot and the pause taking effect are picked up from the live map.
+    await Promise.allSettled([
+      ...inFlightWork,
+      ...Object.values(this.futures).map(({ inner }) => inner),
+    ]);
+
+    this.logger.info('Successfully finished pending tasks.');
+
+    // The durable listener stays up while tasks drain: stopping it earlier rejects every pending
+    // wait registration with "DurableListener stopped", which surfaces as a task failure instead
+    // of the eviction those tasks get above.
     try {
       await this.client.durableListener.stop();
     } catch (e: any) {
       this.logger.error(`Could not stop durable listener: ${e.message}`);
     }
-
-    this.logger.info('Gracefully exiting hatchet worker, running tasks will attempt to finish...');
-
-    // Awaits the underlying work rather than the cancelable wrapper, which rejects as soon as a
-    // cancellation arrives while the task is still winding down.
-    await Promise.allSettled(Object.values(this.futures).map(({ inner }) => inner));
-
-    this.logger.info('Successfully finished pending tasks.');
 
     // Unregistering closes the action stream and stops the heartbeat, so it has to wait until
     // the running tasks are done. Stopping the heartbeat earlier lets the engine treat the worker

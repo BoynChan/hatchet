@@ -7,6 +7,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/hatchet-dev/hatchet/internal/enumerables"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlchelpers"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
@@ -111,6 +113,8 @@ func newLogLineRepository(s *sharedRepository) LogLineRepository {
 }
 
 func (r *logLineRepositoryImpl) ListLogLines(ctx context.Context, tenantId uuid.UUID, opts *ListLogsOpts) ([]*ListLogLineRow, error) {
+	db := r.pool.ForTenant(tenantId)
+
 	if err := r.v.Validate(opts); err != nil {
 		return nil, err
 	}
@@ -155,9 +159,9 @@ func (r *logLineRepositoryImpl) ListLogLines(ctx context.Context, tenantId uuid.
 	}
 
 	if opts.Levels != nil {
-		levels := make([]sqlcv1.V1LogLineLevel, len(opts.Levels))
+		levels := make([]enums.V1LogLineLevel, len(opts.Levels))
 		for i, level := range opts.Levels {
-			levels[i] = sqlcv1.V1LogLineLevel(level)
+			levels[i] = enums.V1LogLineLevel(level)
 		}
 
 		queryParams.Levels = levels
@@ -182,16 +186,13 @@ func (r *logLineRepositoryImpl) ListLogLines(ctx context.Context, tenantId uuid.
 		queryParams.TaskIds = internalIds
 	}
 
-	logLines, err := r.queries.ListLogLines(ctx, r.pool, queryParams)
+	logLines, err := r.queries.ListLogLines(ctx, db, queryParams)
 	if err != nil {
 		return nil, err
 	}
 
 	// gather unique task ids, inserted ats to look up associated task external ids
-	uniqueTaskIds := make(map[int64]struct{})
-	for _, logLine := range logLines {
-		uniqueTaskIds[logLine.TaskID] = struct{}{}
-	}
+	uniqueTaskIds := enumerables.ToSet(logLines, func(logLine *sqlcv1.V1LogLine) int64 { return logLine.TaskID })
 
 	taskIds := make([]int64, 0, len(uniqueTaskIds))
 	for taskId := range uniqueTaskIds {
@@ -199,17 +200,14 @@ func (r *logLineRepositoryImpl) ListLogLines(ctx context.Context, tenantId uuid.
 	}
 
 	// look up associated task external ids
-	tasks, err := r.listTasks(ctx, r.pool, tenantId, taskIds)
+	tasks, err := r.listTasks(ctx, db, tenantId, taskIds)
 
 	if err != nil {
 		return nil, err
 	}
 
 	// create a map of task id to external id
-	taskIdToTask := make(map[int64]*sqlcv1.V1Task)
-	for _, task := range tasks {
-		taskIdToTask[task.ID] = task
-	}
+	taskIdToTask := enumerables.KeyBy(tasks, func(task *sqlcv1.V1Task) int64 { return task.ID })
 
 	// attach task external ids to log lines
 	res := make([]*ListLogLineRow, len(logLines))
@@ -232,21 +230,23 @@ func (r *logLineRepositoryImpl) ListLogLines(ctx context.Context, tenantId uuid.
 }
 
 func (r *logLineRepositoryImpl) PutLog(ctx context.Context, tenantId uuid.UUID, opts *CreateLogLineOpts) error {
+	db := r.pool.ForTenant(tenantId)
+
 	if err := r.v.Validate(opts); err != nil {
 		return err
 	}
 
-	var level sqlcv1.V1LogLineLevel
+	var level enums.V1LogLineLevel
 
 	if opts.Level == nil {
-		level = sqlcv1.V1LogLineLevel("INFO")
+		level = enums.V1LogLineLevel("INFO")
 	} else {
-		level = sqlcv1.V1LogLineLevel(*opts.Level)
+		level = enums.V1LogLineLevel(*opts.Level)
 	}
 
 	_, err := r.queries.InsertLogLine(
 		ctx,
-		r.pool,
+		db,
 		[]sqlcv1.InsertLogLineParams{
 			{
 				TenantID:       tenantId,
@@ -266,6 +266,8 @@ func (r *logLineRepositoryImpl) PutLog(ctx context.Context, tenantId uuid.UUID, 
 }
 
 func (r *logLineRepositoryImpl) GetLogLinePointMetrics(ctx context.Context, tenantId uuid.UUID, opts *GetLogLinePointMetricsOpts) ([]*sqlcv1.GetLogLinePointMetricsRow, error) {
+	db := r.pool.ForTenant(tenantId)
+
 	if err := r.v.Validate(opts); err != nil {
 		return nil, err
 	}
@@ -284,9 +286,9 @@ func (r *logLineRepositoryImpl) GetLogLinePointMetrics(ctx context.Context, tena
 	}
 
 	if len(opts.Levels) > 0 {
-		lvls := make([]sqlcv1.V1LogLineLevel, len(opts.Levels))
+		lvls := make([]enums.V1LogLineLevel, len(opts.Levels))
 		for i, l := range opts.Levels {
-			lvls[i] = sqlcv1.V1LogLineLevel(l)
+			lvls[i] = enums.V1LogLineLevel(l)
 		}
 		params.Levels = lvls
 	}
@@ -299,7 +301,7 @@ func (r *logLineRepositoryImpl) GetLogLinePointMetrics(ctx context.Context, tena
 		params.TaskIds = internalIds
 	}
 
-	rows, err := r.queries.GetLogLinePointMetrics(ctx, r.pool, params)
+	rows, err := r.queries.GetLogLinePointMetrics(ctx, db, params)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +310,9 @@ func (r *logLineRepositoryImpl) GetLogLinePointMetrics(ctx context.Context, tena
 }
 
 func (r *logLineRepositoryImpl) resolveTaskExternalIds(ctx context.Context, tenantId uuid.UUID, externalIds []uuid.UUID) ([]int64, error) {
-	tasks, err := r.queries.FlattenExternalIds(ctx, r.pool, sqlcv1.FlattenExternalIdsParams{
+	db := r.pool.ForTenant(tenantId)
+
+	tasks, err := r.queries.FlattenExternalIds(ctx, db, sqlcv1.FlattenExternalIdsParams{
 		Tenantid:    tenantId,
 		Externalids: externalIds,
 	})

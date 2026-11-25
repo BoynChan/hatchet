@@ -5,6 +5,61 @@ All notable changes to Hatchet's Ruby SDK will be documented in this changelog.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The `Hatchet::BatchTaskConfig` docs no longer say a batch flushes once `group_max_runs` is exceeded. While a group has `group_max_runs` batches running, its ready batches stay buffered. The docs also give the engine defaults: `max_interval_ms` is 1000, measured from when a batch's first item is buffered, and `group_max_runs` is 100.
+
+## [0.12.4] - 2026-11-17
+
+### Fixed
+
+- Triggering a run, bulk triggering and pushing events, one at a time or in bulk, now retry when the engine throttles the call with `RESOURCE_EXHAUSTED` and a `google.rpc.RetryInfo` detail, waiting the delay the server asks for. Other errors, including `RESOURCE_EXHAUSTED` without `RetryInfo`, are raised at once as before. The wait doubles with each retry up to 5 seconds and is extended by a random amount of up to 20%, so that clients throttled together do not all retry at the same moment. At most 5 attempts are made, and a call the server asks to wait longer than 5 seconds fails at once with the server's error.
+
+## [0.12.3] - 2026-11-16
+
+### Fixed
+
+- The REST client accepts the `BATCH_BUFFERED` task event type and the `STREAM_TOPIC`, `STREAM_MESSAGE` and `STREAM_RETENTION` tenant resources, which the engine already returns.
+
+## [0.12.2] - 2026-11-10
+
+### Fixed
+
+- Task `wait_for` and `skip_if` conditions grouped with `Hatchet.or_`, and `Hatchet::ParentCondition`s, were silently dropped at workflow registration, so those tasks ran without waiting or skipping. They are now registered with the engine.
+- `Context#was_skipped?` returns true only for a parent the engine marked as skipped, instead of for any parent whose output is missing.
+
+## [0.12.1] - 2026-11-02
+
+### Added
+
+- `TenantEntitlements#sandbox_operator`, the tenant's sandbox entitlement.
+
+## [0.12.0] - 2026-10-26
+
+### Added
+
+- Adds `hatchet.streams`, a client for durable streams: topics that store messages independent of any run, which readers can resume from a cursor. `publish` returns once a message is stored, keeps a client's messages to a topic in call order, and batches publishes queued behind an in-flight request (`batch_timeout:` holds a message to gather more). Payloads over 4 MiB are uploaded over REST, up to 64 MiB. `subscribe` reads a topic from the oldest retained message or a `cursor:`, yielding to a block or returning an `Enumerator`, and resubscribes from the last event read when the connection drops. `reset` starts new readers after the latest message or a given cursor, and `topic_metadata` describes a topic's retained messages.
+
+## [0.11.2] - 2026-10-27
+
+### Changed
+
+- The REST client sends `Accept: application/json` on the Slack OAuth start and callback calls, since the API now declares a `429 Too Many Requests` response on every authenticated operation.
+
+## [0.11.1] - 2026-10-23
+
+### Fixed
+
+- [Durable tasks](https://docs.hatchet.run/v1/durable-tasks) no longer stall after the worker's durable stream reconnects in the middle of a wait. The worker now reports the last completion it received in its status requests, so the engine resumes delivery from there instead of holding later completions until the task is evicted and replayed.
+
+## [0.11.0] - 2026-10-14
+
+### Added
+
+- Adds `hatchet.rate_limits.pause(key:, until_time:)` and `Context#pause_rate_limit(key, until_time:)`, which keep queued runs that consume a rate limit key from starting until a given time.
+
 ## [0.10.0] - 2026-10-08
 
 ### Added

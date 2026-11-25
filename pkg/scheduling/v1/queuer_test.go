@@ -20,19 +20,22 @@ import (
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
-// recordingQueueRepo wraps fakeQueueRepository and records RequeueRateLimitedItems calls.
+// recordingQueueRepo wraps fakeQueueRepository and records RequeueRateLimitedItems calls,
+// answering each with the configured next refill time and error.
 type recordingQueueRepo struct {
 	fakeQueueRepository
 
 	mu           sync.Mutex
 	requeueCalls int
+	next         *time.Time
+	err          error
 }
 
-func (r *recordingQueueRepo) RequeueRateLimitedItems(context.Context, uuid.UUID, string) ([]*sqlcv1.RequeueRateLimitedQueueItemsRow, error) {
+func (r *recordingQueueRepo) RequeueRateLimitedItems(context.Context, uuid.UUID, string) (*time.Time, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.requeueCalls++
-	return nil, nil
+	return r.next, r.err
 }
 
 func (r *recordingQueueRepo) callCount() int {
@@ -65,6 +68,67 @@ func TestQueuerRequeuesRateLimitedItemsOnFreshProcess(t *testing.T) {
 
 // Ensure recordingQueueRepo still satisfies QueueRepository.
 var _ v1repo.QueueRepository = (*recordingQueueRepo)(nil)
+
+func newRequeueTestQueuer(repo v1repo.QueueRepository) *Queuer {
+	l := zerolog.Nop()
+
+	return &Queuer{
+		repo:      repo,
+		tenantId:  uuid.New(),
+		queueName: "default",
+		l:         &l,
+	}
+}
+
+// The requeue statement runs only once its scheduled time has passed: repeated calls before
+// the deadline skip the database, and a call after it runs the statement again.
+func TestQueuer_RequeueRateLimitedItems_RunsOnlyWhenScheduled(t *testing.T) {
+	repo := &recordingQueueRepo{}
+	q := newRequeueTestQueuer(repo)
+	ctx := context.Background()
+
+	q.requeueRateLimitedItems(ctx)
+	q.requeueRateLimitedItems(ctx)
+	q.requeueRateLimitedItems(ctx)
+	require.Equal(t, 1, repo.callCount(), "calls before the scheduled time must not hit the database")
+
+	q.nextRateLimitRequeueAt.Store(time.Now().Add(-time.Millisecond).UnixNano())
+	q.requeueRateLimitedItems(ctx)
+	require.Equal(t, 2, repo.callCount(), "a call after the scheduled time runs the statement")
+}
+
+// The next run is the earliest parked refill time when it is within one poll interval, and one
+// poll interval otherwise: when nothing is parked, when the refill is further away, when it is
+// already due, and when the statement fails.
+func TestQueuer_RequeueRateLimitedItems_SchedulesNextRun(t *testing.T) {
+	soon := 200 * time.Millisecond
+
+	cases := []struct {
+		name string
+		next func(now time.Time) *time.Time
+		err  error
+		want func(now time.Time) time.Time
+	}{
+		{"nothing parked", func(time.Time) *time.Time { return nil }, nil, func(now time.Time) time.Time { return now.Add(queuePollInterval) }},
+		{"refill within the poll interval", func(now time.Time) *time.Time { t := now.Add(soon); return &t }, nil, func(now time.Time) time.Time { return now.Add(soon) }},
+		{"refill beyond the poll interval", func(now time.Time) *time.Time { t := now.Add(5 * queuePollInterval); return &t }, nil, func(now time.Time) time.Time { return now.Add(queuePollInterval) }},
+		{"refill already due", func(now time.Time) *time.Time { t := now.Add(-soon); return &t }, nil, func(now time.Time) time.Time { return now.Add(-soon) }},
+		{"statement error", func(now time.Time) *time.Time { t := now.Add(soon); return &t }, errors.New("boom"), func(now time.Time) time.Time { return now.Add(queuePollInterval) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			repo := &recordingQueueRepo{next: tc.next(now), err: tc.err}
+			q := newRequeueTestQueuer(repo)
+
+			q.requeueRateLimitedItems(context.Background())
+
+			require.Equal(t, 1, repo.callCount())
+			require.WithinDuration(t, tc.want(now), time.Unix(0, q.nextRateLimitRequeueAt.Load()), 50*time.Millisecond)
+		})
+	}
+}
 
 // blockingFlushQueueRepo serves a queue whose items leave it when assigned,
 // blocks the first flush until released and records every flush.
@@ -414,6 +478,38 @@ func TestQueuerQueueCoalescesIntoBufferedWake(t *testing.T) {
 	<-q.notifyQueueCh
 	q.queue(ctx)
 	require.Len(t, q.notifyQueueCh, 1, "once the buffered wake-up is consumed the next one is delivered, canceled context or not")
+}
+
+// TestQueuerQueueAfterCoalescesPendingWakes pins the same rule for a delayed wake: a second
+// request while one is waiting does not start its own, and a request made after it has fired
+// is delivered. The second deadline is later, and the first wake is drained before it.
+// notifyQueueCh holds one wake, so two timers with the same deadline can both fire before the
+// drain and look coalesced.
+func TestQueuerQueueAfterCoalescesPendingWakes(t *testing.T) {
+	l := zerolog.Nop()
+	q := &Queuer{l: &l, notifyQueueCh: make(chan map[string]string, 1)}
+	ctx := context.Background()
+
+	const secondDelay = 300 * time.Millisecond
+
+	q.queueAfter(ctx, 20*time.Millisecond)
+	q.queueAfter(ctx, secondDelay)
+
+	require.Eventually(t, func() bool {
+		return len(q.notifyQueueCh) == 1
+	}, secondDelay/2, time.Millisecond)
+
+	<-q.notifyQueueCh
+
+	require.Never(t, func() bool {
+		return len(q.notifyQueueCh) > 0
+	}, secondDelay, 5*time.Millisecond, "the second request must not produce its own wake")
+
+	q.queueAfter(ctx, time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		return len(q.notifyQueueCh) == 1
+	}, time.Second, time.Millisecond, "a request made after the pending wake fired must be delivered")
 }
 
 // failingFlushQueueRepo always has two items to hand out and fails every flush.

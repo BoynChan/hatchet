@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hatchet-dev/hatchet/pkg/config/database"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	repo "github.com/hatchet-dev/hatchet/pkg/repository"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 	"github.com/hatchet-dev/hatchet/pkg/scheduling/v1/concurrency"
@@ -48,6 +49,7 @@ func createWorkflowWithConcurrency(
 	tenantId uuid.UUID,
 	name string,
 	entries []repo.CreateConcurrencyOpts,
+	rateLimitKeys ...string,
 ) *workflowWithStep {
 	t.Helper()
 
@@ -60,6 +62,7 @@ func createWorkflowWithConcurrency(
 				ReadableId:  "my-task",
 				Action:      "test:run",
 				Concurrency: entries,
+				RateLimits:  stepRateLimits(t, ctx, conf, tenantId, rateLimitKeys),
 			},
 		},
 	})
@@ -73,6 +76,18 @@ func createWorkflowWithConcurrency(
 		workflowId:        wfVersion.WorkflowVersion.WorkflowId,
 		workflowVersionId: wfVersion.WorkflowVersion.ID,
 		stepId:            steps[0].ID,
+	}
+}
+
+// sharedLimitDef is a tenant-scoped Concurrency entry riding on a workflow put (the only registration path);
+// every declaring task carries the full definition
+func sharedLimitDef(strategyType string, maxRuns int32) repo.CreateConcurrencyOpts {
+	return repo.CreateConcurrencyOpts{
+		Name:           "shared-limit",
+		IsTenantScoped: true,
+		Expression:     "input.my_id",
+		MaxRuns:        &maxRuns,
+		LimitStrategy:  &strategyType,
 	}
 }
 
@@ -97,15 +112,7 @@ func setupSharedConcurrencyTest(
 	})
 	require.NoError(t, err)
 
-	// the definition is a tenant-scoped Concurrency entry riding on a workflow put (the
-	// only registration path); every declaring task carries the full definition
-	def := repo.CreateConcurrencyOpts{
-		Name:           "shared-limit",
-		IsTenantScoped: true,
-		Expression:     "input.my_id",
-		MaxRuns:        &maxRuns,
-		LimitStrategy:  &strategyType,
-	}
+	def := sharedLimitDef(strategyType, maxRuns)
 
 	createWorkflowWithConcurrency(t, ctx, conf, tenantId, fmt.Sprintf("%s-registrar", name), []repo.CreateConcurrencyOpts{def})
 
@@ -341,7 +348,7 @@ func TestConcurrency_SharedStrategy_UpsertInPlace(t *testing.T) {
 		require.Equal(t, s.strategy.ID, updated.ID, "upsert must update the same strategy row")
 		require.Equal(t, int32(5), updated.MaxConcurrency)
 		require.Equal(t, "input.other_id", updated.Expression)
-		require.Equal(t, sqlcv1.V1ConcurrencyStrategyCANCELINPROGRESS, updated.Strategy)
+		require.Equal(t, enums.V1ConcurrencyStrategyCANCELINPROGRESS, updated.Strategy)
 		require.True(t, updated.IsActive)
 
 		// the update trigger propagates the new definition to referencing rows, so
@@ -479,8 +486,7 @@ func TestConcurrency_SharedStrategy_ActiveCheck(t *testing.T) {
 }
 
 // TestConcurrency_SharedStrategy_WorkflowLevel verifies workflow-level tenant-scoped
-// concurrency: with the DAG operator entitlement it lands on the orchestrator task, and
-// without it (the old parent/child path) it is rejected loudly.
+// concurrency: it lands on the DAG orchestrator task.
 func TestConcurrency_SharedStrategy_WorkflowLevel(t *testing.T) {
 	runWithDatabase(t, func(conf *database.Layer) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -489,20 +495,13 @@ func TestConcurrency_SharedStrategy_WorkflowLevel(t *testing.T) {
 
 		queries := sqlcv1.New()
 
-		newTenant := func(name string, dagOperator bool) uuid.UUID {
-			tenantId := uuid.New()
-			_, err := conf.V1.Tenant().CreateTenant(ctx, &repo.CreateTenantOpts{
-				ID:   &tenantId,
-				Name: name,
-				Slug: fmt.Sprintf("%s-%s", name, tenantId.String()),
-			})
-			require.NoError(t, err)
-
-			err = conf.V1.TenantEntitlement().SetEntitlements(ctx, tenantId, repo.TenantEntitlements{DAGOperator: dagOperator})
-			require.NoError(t, err)
-
-			return tenantId
-		}
+		dagTenant := uuid.New()
+		_, err := conf.V1.Tenant().CreateTenant(ctx, &repo.CreateTenantOpts{
+			ID:   &dagTenant,
+			Name: "shared-wf-dag-test",
+			Slug: fmt.Sprintf("shared-wf-dag-test-%s", dagTenant.String()),
+		})
+		require.NoError(t, err)
 
 		desc := "test workflow"
 		maxRuns := int32(1)
@@ -520,9 +519,6 @@ func TestConcurrency_SharedStrategy_WorkflowLevel(t *testing.T) {
 				LimitStrategy:  &strategyType,
 			},
 		}
-
-		// new path: the entry becomes concurrency on the DAG orchestrator task
-		dagTenant := newTenant("shared-wf-dag-test", true)
 
 		wfVersion, err := conf.V1.Workflows().PutWorkflowVersion(ctx, dagTenant, &repo.CreateWorkflowVersionOpts{
 			Name:        "shared-wf-dag",
@@ -550,18 +546,6 @@ func TestConcurrency_SharedStrategy_WorkflowLevel(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, rows, 1, "the tenant-scoped entry should land on the orchestrator step")
 		require.True(t, rows[0].TenantStrategyID.Valid)
-
-		// old path: rejected loudly
-		oldTenant := newTenant("shared-wf-old-test", false)
-
-		_, err = conf.V1.Workflows().PutWorkflowVersion(ctx, oldTenant, &repo.CreateWorkflowVersionOpts{
-			Name:        "shared-wf-old",
-			Description: &desc,
-			Concurrency: workflowConcurrency,
-			Tasks:       multiTask,
-		})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "not supported at the workflow level")
 
 		return nil
 	})

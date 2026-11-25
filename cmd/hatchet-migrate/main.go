@@ -10,8 +10,13 @@ import (
 	"github.com/hatchet-dev/hatchet/cmd/hatchet-migrate/migrate"
 	"github.com/hatchet-dev/hatchet/pkg/cmdutils"
 	"github.com/hatchet-dev/hatchet/pkg/config/shared"
+	"github.com/hatchet-dev/hatchet/pkg/encryption"
 	"github.com/hatchet-dev/hatchet/pkg/logger"
 )
+
+// olapDatabaseEnvVar is the separate OLAP database, when the engine is configured with one. It
+// carries the same schema, so every up and down pass that runs on DATABASE_URL runs there too.
+const olapDatabaseEnvVar = "OLAP_DATABASE_URL"
 
 var printVersion bool
 var migrateDown string
@@ -22,6 +27,9 @@ var upToVersion string
 var rootCmd = &cobra.Command{
 	Use:   "hatchet-migrate",
 	Short: "hatchet-migrate runs database migrations for Hatchet.",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		return encryption.RequireFIPSBuild()
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		if printVersion {
 			fmt.Println(Version)
@@ -38,6 +46,10 @@ var rootCmd = &cobra.Command{
 
 		if migrateDown != "" {
 			migrate.RunDownMigration(ctx, migrateDown, migrate.WithLogger(&l))
+
+			if os.Getenv(olapDatabaseEnvVar) != "" {
+				migrate.RunDownMigration(ctx, migrateDown, migrate.WithLogger(&l), migrate.WithDatabaseEnvVar(olapDatabaseEnvVar))
+			}
 		} else {
 			if upToPenultimate && upToVersion != "" {
 				fmt.Println("cannot use --up-to-penultimate and --up-to together")
@@ -59,6 +71,14 @@ var rootCmd = &cobra.Command{
 			if err := migrate.RunMigrations(ctx, opts...); err != nil {
 				fmt.Println(err)
 				os.Exit(1)
+			}
+
+			// A separate OLAP database carries the same schema, so it gets the same migrations.
+			if os.Getenv(olapDatabaseEnvVar) != "" {
+				if err := migrate.RunMigrations(ctx, append(opts, migrate.WithDatabaseEnvVar(olapDatabaseEnvVar))...); err != nil {
+					fmt.Println(err)
+					os.Exit(1)
+				}
 			}
 		}
 	},

@@ -41,6 +41,9 @@ TenantVersion:
     - "V0"
     - "V1"
   type: string
+  x-go-type: enums.TenantMajorEngineVersion
+  x-go-type-import:
+    path: github.com/hatchet-dev/hatchet/pkg/enums
 
 TenantUIVersion:
   enum:
@@ -83,6 +86,9 @@ TenantEnvironment:
     - "development"
     - "production"
   type: string
+  x-go-type: enums.TenantEnvironment
+  x-go-type-import:
+    path: github.com/hatchet-dev/hatchet/pkg/enums
 
 CreateTenantRequest:
   properties:
@@ -150,7 +156,13 @@ TenantResource:
     - "CRON"
     - "SCHEDULE"
     - "INCOMING_WEBHOOK"
+    - "STREAM_TOPIC"
+    - "STREAM_MESSAGE"
+    - "STREAM_RETENTION"
   type: string
+  x-go-type: enums.LimitResource
+  x-go-type-import:
+    path: github.com/hatchet-dev/hatchet/pkg/enums
 
 TenantResourceLimit:
   properties:
@@ -192,6 +204,45 @@ TenantResourcePolicy:
       description: A list of resource limits for the tenant.
   required:
     - limits
+  type: object
+
+TenantEntitlements:
+  properties:
+    auditLogs:
+      type: boolean
+    prometheusMetrics:
+      type: boolean
+    strictAdditionalMetadataFilters:
+      type: boolean
+    dagOperator:
+      type: boolean
+    durableStreams:
+      type: boolean
+    serverlessOperator:
+      type: boolean
+    sandboxOperator:
+      type: boolean
+  required:
+    - auditLogs
+    - prometheusMetrics
+    - strictAdditionalMetadataFilters
+    - dagOperator
+    - durableStreams
+    - serverlessOperator
+    - sandboxOperator
+  type: object
+
+UpdateTenantEntitlementsRequest:
+  properties:
+    durableStreams:
+      type: boolean
+      description: Whether the tenant has opted into durable streams.
+    serverlessOperator:
+      type: boolean
+      description: Whether the tenant has opted into the serverless operator.
+    sandboxOperator:
+      type: boolean
+      description: Whether the tenant has opted into the sandbox operator.
   type: object
 
 TenantMember:
@@ -236,6 +287,9 @@ TenantMemberRole:
     - "MEMBER"
     - "VIEWER"
   type: string
+  x-go-type: enums.TenantMemberRole
+  x-go-type-import:
+    path: github.com/hatchet-dev/hatchet/pkg/enums
 
 TenantList:
   properties:

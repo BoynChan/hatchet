@@ -12,13 +12,15 @@ import (
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
+const maxDurableEventLogEntriesPerRequest = int64(1000)
+
 func (t *DurableTasksService) V1DurableTaskEventLogList(ctx echo.Context, request gen.V1DurableTaskEventLogListRequestObject) (gen.V1DurableTaskEventLogListResponseObject, error) {
 	task := ctx.Get("durable-task").(*sqlcv1.V1TasksOlap)
 
-	limit := int64(1000)
+	limit := maxDurableEventLogEntriesPerRequest
 	offset := int64(0)
 
-	if request.Params.Limit != nil {
+	if request.Params.Limit != nil && *request.Params.Limit < maxDurableEventLogEntriesPerRequest {
 		limit = *request.Params.Limit
 	}
 
@@ -53,7 +55,7 @@ func toDurableEventLogEntries(entries []*sqlcv1.ListDurableEventLogForTaskRow, c
 		entry := gen.V1DurableEventLogEntry{
 			NodeId:          e.NodeID,
 			BranchId:        e.BranchID,
-			Kind:            gen.V1DurableEventLogKind(e.Kind),
+			Kind:            e.Kind,
 			IsSatisfied:     e.IsSatisfied,
 			InsertedAt:      insertedAt,
 			TaskExternalId:  e.DurableTaskExternalID,

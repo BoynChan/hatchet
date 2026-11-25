@@ -10,7 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/hatchet-dev/hatchet/internal/listutils"
+	"github.com/hatchet-dev/hatchet/internal/enumerables"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlchelpers"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
@@ -122,13 +123,15 @@ func (c *ConcurrencyRepositoryImpl) UpdateConcurrencyStrategyIsActive(
 	tenantId uuid.UUID,
 	strategy *sqlcv1.V1StepConcurrency,
 ) error {
+	db := c.pool.ForTenant(tenantId)
+
 	// tenant-scoped strategies are retired by CheckAndDeactivateTenantConcurrency (one
 	// batched, mostly lock-free pass per tenant) rather than per manager
 	if strategy.TenantStrategyID.Valid {
 		return nil
 	}
 
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, c.pool, c.l)
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, c.l)
 
 	if err != nil {
 		return err
@@ -183,7 +186,9 @@ func (c *ConcurrencyRepositoryImpl) CheckAndDeactivateTenantConcurrency(
 	tenantId uuid.UUID,
 	strategyId int64,
 ) error {
-	isActive, err := c.queries.CheckTenantStrategyActive(ctx, c.pool, sqlcv1.CheckTenantStrategyActiveParams{
+	db := c.pool.ForTenant(tenantId)
+
+	isActive, err := c.queries.CheckTenantStrategyActive(ctx, db, sqlcv1.CheckTenantStrategyActiveParams{
 		Tenantid:   tenantId,
 		Strategyid: strategyId,
 	})
@@ -204,7 +209,9 @@ func (c *ConcurrencyRepositoryImpl) deactivateTenantConcurrency(
 	tenantId uuid.UUID,
 	strategyId int64,
 ) error {
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, c.pool, c.l)
+	db := c.pool.ForTenant(tenantId)
+
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, c.l)
 
 	if err != nil {
 		return err
@@ -272,36 +279,37 @@ func (c *ConcurrencyRepositoryImpl) RunConcurrencyStrategy(
 	strategy *sqlcv1.V1StepConcurrency,
 ) (res *RunConcurrencyResult, err error) {
 	switch strategy.Strategy {
-	case sqlcv1.V1ConcurrencyStrategyGROUPROUNDROBIN:
+	case enums.V1ConcurrencyStrategyGROUPROUNDROBIN:
 		res, err = c.runGroupRoundRobin(ctx, tenantId, strategy)
 
 		if err != nil {
 			return nil, fmt.Errorf("group round robin (strategy ID: %d): %w", strategy.ID, err)
 		}
-	case sqlcv1.V1ConcurrencyStrategyCANCELINPROGRESS:
+	case enums.V1ConcurrencyStrategyCANCELINPROGRESS:
 		res, err = c.runCancelInProgress(ctx, tenantId, strategy)
 
 		if err != nil {
 			return nil, fmt.Errorf("cancel in progress (strategy ID: %d): %w", strategy.ID, err)
 		}
-	case sqlcv1.V1ConcurrencyStrategyCANCELNEWEST:
+	case enums.V1ConcurrencyStrategyCANCELNEWEST:
 		res, err = c.runCancelNewest(ctx, tenantId, strategy)
 
 		if err != nil {
 			return nil, fmt.Errorf("cancel newest (strategy ID: %d): %w", strategy.ID, err)
 		}
-	case sqlcv1.V1ConcurrencyStrategyCANCELQUEUEDEXCEPTNEWEST:
+	case enums.V1ConcurrencyStrategyCANCELQUEUEDEXCEPTNEWEST:
 		res, err = c.runCancelQueuedExceptNewest(ctx, tenantId, strategy)
 
 		if err != nil {
 			return nil, fmt.Errorf("cancel except newest (strategy ID: %d): %w", strategy.ID, err)
 		}
-	case sqlcv1.V1ConcurrencyStrategyCANCELQUEUEDEXCEPTOLDEST:
+	case enums.V1ConcurrencyStrategyCANCELQUEUEDEXCEPTOLDEST:
 		res, err = c.runCancelQueuedExceptOldest(ctx, tenantId, strategy)
 
 		if err != nil {
 			return nil, fmt.Errorf("cancel except oldest (strategy ID: %d): %w", strategy.ID, err)
 		}
+	case enums.V1ConcurrencyStrategyNONE:
 	}
 
 	// No strategy branch ran. This should no longer be reachable (every enum value has a
@@ -320,7 +328,9 @@ func (c *ConcurrencyRepositoryImpl) runGroupRoundRobin(
 	tenantId uuid.UUID,
 	strategy *sqlcv1.V1StepConcurrency,
 ) (res *RunConcurrencyResult, err error) {
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, c.pool, c.l)
+	db := c.pool.ForTenant(tenantId)
+
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, c.l)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare transaction (strategy ID: %d): %w", strategy.ID, err)
@@ -470,8 +480,9 @@ func (c *ConcurrencyRepositoryImpl) runCancelInProgress(
 	tenantId uuid.UUID,
 	strategy *sqlcv1.V1StepConcurrency,
 ) (res *RunConcurrencyResult, err error) {
+	db := c.pool.ForTenant(tenantId)
 
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, c.pool, c.l)
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, c.l)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare transaction (strategy ID: %d): %w", strategy.ID, err)
@@ -695,7 +706,9 @@ func (c *ConcurrencyRepositoryImpl) runCancelQueuedExceptNewest(
 	tenantId uuid.UUID,
 	strategy *sqlcv1.V1StepConcurrency,
 ) (res *RunConcurrencyResult, err error) {
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, c.pool, c.l)
+	db := c.pool.ForTenant(tenantId)
+
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, c.l)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare transaction (strategy ID: %d): %w", strategy.ID, err)
@@ -952,7 +965,9 @@ func (c *ConcurrencyRepositoryImpl) runCancelQueuedExceptOldest(
 	tenantId uuid.UUID,
 	strategy *sqlcv1.V1StepConcurrency,
 ) (res *RunConcurrencyResult, err error) {
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, c.pool, c.l)
+	db := c.pool.ForTenant(tenantId)
+
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, c.l)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare transaction (strategy ID: %d): %w", strategy.ID, err)
@@ -1211,7 +1226,9 @@ func (c *ConcurrencyRepositoryImpl) runCancelNewest(
 	tenantId uuid.UUID,
 	strategy *sqlcv1.V1StepConcurrency,
 ) (res *RunConcurrencyResult, err error) {
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, c.pool, c.l)
+	db := c.pool.ForTenant(tenantId)
+
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, c.l)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare transaction (strategy ID: %d): %w", strategy.ID, err)
@@ -1484,18 +1501,22 @@ func (c *ConcurrencyRepositoryImpl) upsertQueuesForQueuedTasks(ctx context.Conte
 }
 
 func (c *ConcurrencyRepositoryImpl) DeactivateStaleStepConcurrency(ctx context.Context, tenantId uuid.UUID) error {
-	if err := c.queries.DeactivateStaleStepConcurrency(ctx, c.pool, tenantId); err != nil {
+	db := c.pool.ForTenant(tenantId)
+
+	if err := c.queries.DeactivateStaleStepConcurrency(ctx, db, tenantId); err != nil {
 		return err
 	}
 
-	return c.queries.DeactivateStaleTenantConcurrency(ctx, c.pool, tenantId)
+	return c.queries.DeactivateStaleTenantConcurrency(ctx, db, tenantId)
 }
 
 func (c *ConcurrencyRepositoryImpl) ListTenantsWithManyStepConcurrencies(ctx context.Context, threshold int64) ([]*sqlcv1.ListTenantsWithManyStepConcurrenciesRow, error) {
-	return c.queries.ListTenantsWithManyStepConcurrencies(ctx, c.pool, threshold)
+	return c.queries.ListTenantsWithManyStepConcurrencies(ctx, c.pool.ForShared(), threshold)
 }
 
 func (c *ConcurrencyRepositoryImpl) ReadConcurrencySlotsForIndexing(ctx context.Context, tenantId uuid.UUID, strategyId int64, writeCh chan<- *sqlcv1.ListConcurrencySlotsForIndexingRow) error {
+	db := c.pool.ForTenant(tenantId)
+
 	// we don't want to hold the transaction open if we're blocked on the write channel, so we use this
 	// context to escape the <- writeCh loop and close the tx
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -1503,7 +1524,7 @@ func (c *ConcurrencyRepositoryImpl) ReadConcurrencySlotsForIndexing(ctx context.
 
 	// we use a repeatable read so that we don't infinitely loop while reading new committed rows; these changes are represented
 	// in the WAL which updates the index
-	tx, commit, rollback, err := sqlchelpers.PrepareTxWithStatementTimeout(ctx, c.pool, c.l, 1000*60*5, pgx.TxOptions{
+	tx, commit, rollback, err := sqlchelpers.PrepareTxWithStatementTimeout(ctx, db, c.l, 1000*60*5, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
 	})
@@ -1618,7 +1639,7 @@ func (c *ConcurrencyRepositoryImpl) UpdateConcurrencySlotsTx(
 	}
 
 	// releaseTasks requires a 1:1 match between input tasks and returned rows, so dedupe first.
-	tasksToCancel = listutils.UniqBy(tasksToCancel, createTaskUniqueKey)
+	tasksToCancel = enumerables.UniqBy(tasksToCancel, createTaskUniqueKey)
 
 	// note: we'd prefer to call cancelTasks here, but keeping this consistent with the previous concurrency
 	// implementation. the only important thing is that we delete v1_concurrency_slot, but we need to release
@@ -1672,7 +1693,9 @@ func (c *ConcurrencyRepositoryImpl) UpdateConcurrencySlots(
 	filledSlots []TaskIdInsertedAtRetryCount,
 	cancelledSlots []CancelledSlotInput,
 ) (*RunConcurrencyResult, error) {
-	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, c.pool, c.l)
+	db := c.pool.ForTenant(tenantId)
+
+	tx, commit, rollback, err := sqlchelpers.PrepareTx(ctx, db, c.l)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare transaction: %w", err)

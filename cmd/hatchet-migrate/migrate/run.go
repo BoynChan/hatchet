@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"embed"
@@ -13,8 +14,10 @@ import (
 	"time"
 
 	"github.com/hatchet-dev/pgoutbox"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib" // register the pgx driver for database/sql
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
 	"github.com/rs/zerolog"
@@ -33,6 +36,7 @@ type runMigrationsOpt struct {
 	upToPenultimate bool
 	upToVersion     int64
 	databaseURL     string
+	databaseEnvVar  string
 	l               *zerolog.Logger
 }
 
@@ -77,6 +81,14 @@ func WithDatabaseURL(url string) RunMigrationsOpt {
 	}
 }
 
+// WithDatabaseEnvVar reads the database URL from the given environment variable instead of
+// DATABASE_URL, and names it in diagnostics.
+func WithDatabaseEnvVar(envVar string) RunMigrationsOpt {
+	return func(o *runMigrationsOpt) {
+		o.databaseEnvVar = envVar
+	}
+}
+
 // WithLogger routes migration output through the given logger. Callers that
 // embed the engine in their own process should pass their configured logger so
 // that migrations do not write to stdout/stderr on their own terms.
@@ -96,10 +108,9 @@ func RunMigrations(ctx context.Context, opts ...RunMigrationsOpt) error {
 
 	l := options.resolveLogger()
 
-	const (
-		databaseEnvVar = "DATABASE_URL"
-		phaseName      = "oss"
-	)
+	const phaseName = "oss"
+
+	databaseEnvVar := cmp.Or(options.databaseEnvVar, "DATABASE_URL")
 
 	rawURL := options.databaseURL
 	if rawURL == "" {
@@ -119,7 +130,7 @@ func RunMigrations(ctx context.Context, opts ...RunMigrationsOpt) error {
 	err := retry.Do(retryCtx, retry.NewConstant(1*time.Second), func(ctx context.Context) error {
 		var err error
 		if db == nil {
-			db, err = goose.OpenDBWithDriver("postgres", rawURL)
+			db, err = openMigrationDB(rawURL)
 
 			if err != nil {
 				return retry.RetryableError(fmt.Errorf("failed to open DB: %w", err))
@@ -352,7 +363,16 @@ func RunMigrations(ctx context.Context, opts ...RunMigrationsOpt) error {
 // runOutboxMigration runs the embedded pgoutbox migrations against the database
 // at rawURL before the goose migrations are applied.
 func runOutboxMigration(ctx context.Context, rawURL string) error {
-	pool, err := pgxpool.New(ctx, rawURL)
+	config, err := pgxpool.ParseConfig(rawURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse pgoutbox pool config: %w", err)
+	}
+
+	// NOTE: set on the pgconn config rather than the pool, because pgoutbox opens its own
+	// connections from a copy of the pool's connection config.
+	config.ConnConfig.AfterConnect = disableTimeouts
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return fmt.Errorf("failed to open pgoutbox pool: %w", err)
 	}
@@ -363,6 +383,27 @@ func runOutboxMigration(ctx context.Context, rawURL string) error {
 	}
 
 	return nil
+}
+
+// openMigrationDB opens a goose database handle whose connections run without statement or
+// idle-in-transaction timeouts, so role or database defaults don't cut long migrations short.
+func openMigrationDB(rawURL string) (*sql.DB, error) {
+	config, err := pgx.ParseConfig(rawURL)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := goose.SetDialect("postgres"); err != nil {
+		return nil, err
+	}
+
+	config.AfterConnect = disableTimeouts
+
+	return stdlib.OpenDB(*config), nil
+}
+
+func disableTimeouts(ctx context.Context, conn *pgconn.PgConn) error {
+	return conn.Exec(ctx, "SET statement_timeout = 0; SET idle_in_transaction_session_timeout = 0").Close()
 }
 
 // Copied from https://github.com/pressly/goose/blob/6a70e744c8eb2dc4bb90ba641cb03b42d8eef6cd/internal/dialect/dialectquery/postgres.go
@@ -377,7 +418,7 @@ func CreateTable(tableName string) string {
 }
 
 // rewriteV1_0_153GooseVersion remaps the 15-digit version 153 originally
-// shipped under so goose matches 20260910122311_v1_0_153.sql and does not
+// shipped under so goose matches 20260910122311.sql and does not
 // treat that file as missing before the current max version.
 func rewriteV1_0_153GooseVersion(ctx context.Context, conn *sql.Conn) error {
 	_, err := conn.ExecContext(ctx, `
@@ -468,18 +509,20 @@ func RunDownMigration(ctx context.Context, targetVersion string, opts ...RunMigr
 
 	l := options.resolveLogger()
 
-	if err := runDownMigrationImpl(ctx, targetVersion, l); err != nil {
+	if err := runDownMigrationImpl(ctx, targetVersion, options, l); err != nil {
 		l.Fatal().Err(err).Msg("down migration failed")
 	}
 }
 
-func runDownMigrationImpl(ctx context.Context, targetVersion string, l *zerolog.Logger) error {
-	const (
-		databaseEnvVar = "DATABASE_URL"
-		phaseName      = "oss-down"
-	)
+func runDownMigrationImpl(ctx context.Context, targetVersion string, options *runMigrationsOpt, l *zerolog.Logger) error {
+	const phaseName = "oss-down"
 
-	rawURL := os.Getenv(databaseEnvVar)
+	databaseEnvVar := cmp.Or(options.databaseEnvVar, "DATABASE_URL")
+
+	rawURL := options.databaseURL
+	if rawURL == "" {
+		rawURL = os.Getenv(databaseEnvVar)
+	}
 	if rawURL == "" {
 		return migratediag.MissingEnvError(databaseEnvVar, phaseName)
 	}
@@ -494,7 +537,7 @@ func runDownMigrationImpl(ctx context.Context, targetVersion string, l *zerolog.
 	err := retry.Do(retryCtx, retry.NewConstant(1*time.Second), func(ctx context.Context) error {
 		var err error
 		if db == nil {
-			db, err = goose.OpenDBWithDriver("postgres", rawURL)
+			db, err = openMigrationDB(rawURL)
 
 			if err != nil {
 				return retry.RetryableError(fmt.Errorf("failed to open DB: %w", err))
