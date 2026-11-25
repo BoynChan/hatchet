@@ -45,12 +45,4 @@ var Aggregates = []Aggregate{
 			})
 		},
 	},
-	{
-		Table: "v1_agg_events_minute_olap",
-		compact: func(ctx context.Context, q *sqlcv1.Queries, db sqlcv1.DBTX, p compactParams) (int64, error) {
-			return q.CompactEventsMinuteDeltas(ctx, db, sqlcv1.CompactEventsMinuteDeltasParams{
-				Partitionnumber: p.partitionNumber, Batchsize: p.batchSize, Retainfrom: p.retainFrom,
-			})
-		},
-	},
 }

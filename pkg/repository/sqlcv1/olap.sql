@@ -4,27 +4,12 @@ SELECT
     create_v1_hash_partitions('v1_task_status_updates_tmp'::text, @partitions::int) AS v1_task_status_updates_tmp,
     create_v1_hash_partitions('v1_agg_task_statuses_minute_delta_olap'::text, @partitions::int) AS v1_agg_task_statuses_minute_delta_olap,
     create_v1_hash_partitions('v1_agg_task_events_minute_delta_olap'::text, @partitions::int) AS v1_agg_task_events_minute_delta_olap,
-    create_v1_hash_partitions('v1_agg_events_minute_delta_olap'::text, @partitions::int) AS v1_agg_events_minute_delta_olap,
     create_v1_range_partition('v1_tasks_olap'::text, @date::date) AS v1_tasks_olap,
     create_v1_range_partition('v1_runs_olap'::text, @date::date) AS v1_runs_olap,
-    create_v1_range_partition('v1_dags_olap'::text, @date::date) AS v1_dags_olap,
-    create_v1_range_partition('v1_payloads_olap'::text, @date::date) AS v1_payloads_olap,
     create_v1_range_partition('v1_agg_task_statuses_minute_olap'::text, @date::date, 70) AS v1_agg_task_statuses_minute_olap,
     create_v1_range_partition('v1_agg_task_events_minute_olap'::text, @date::date, 70) AS v1_agg_task_events_minute_olap,
-    create_v1_range_partition('v1_agg_events_minute_olap'::text, @date::date, 70) AS v1_agg_events_minute_olap,
-    create_v1_range_partition('v1_agg_stream_bytes_minute_olap'::text, @date::date, 70) AS v1_agg_stream_bytes_minute_olap,
-    create_v1_range_partition('v1_events_olap'::text, @date::date) AS v1_events_olap,
-    create_v1_range_partition('v1_event_to_run_olap'::text, @date::date) AS v1_event_to_run_olap,
-    create_v1_weekly_range_partition('v1_event_lookup_table_olap'::text, @date::date) AS v1_event_lookup_table_olap,
-    create_v1_range_partition('v1_incoming_webhook_validation_failures_olap'::text, @date::date) AS v1_incoming_webhook_validation_failures_olap,
-    create_v1_range_partition('v1_cel_evaluation_failures_olap'::text, @date::date) AS v1_cel_evaluation_failures_olap,
     create_v1_range_partition('v1_task_events_olap'::text, @date::date) AS v1_task_events_olap,
-    create_v1_range_partition('v1_dag_to_task_olap'::text, @date::date) AS v1_dag_to_task_olap,
-    create_v1_monthly_range_partition('v1_lookup_table_olap'::text, @date::date) AS v1_lookup_table_olap,
-    create_v1_monthly_range_partition('v1_statuses_olap'::text, @date::date) AS v1_statuses_olap,
-    create_v1_range_partition('v1_otel_trace_olap'::text, @date::date) AS v1_otel_trace_olap,
-    create_v1_range_partition('v1_otel_trace_lookup_olap'::text, @date::date) AS v1_otel_trace_lookup_olap,
-    create_v1_range_partition('v1_audit_log'::text, @date::date) AS v1_audit_log
+    create_v1_monthly_range_partition('v1_lookup_table_olap'::text, @date::date) AS v1_lookup_table_olap
 ;
 
 -- name: GetOLAPAggregateRetainedFrom :one

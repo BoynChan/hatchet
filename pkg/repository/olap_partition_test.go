@@ -245,7 +245,6 @@ func TestOLAPUpdateTablePartitions_LookupTablePartitionsHaveUniqueExternalId(t *
 	creations, err := queries.CreateOLAPPartitions(ctx, pool, sqlcv1.CreateOLAPPartitionsParams{Date: pgtype.Date{Time: twoMonthsAhead, Valid: true}, Partitions: NUM_PARTITIONS})
 	require.NoError(t, err)
 	require.Equal(t, int32(1), creations.V1LookupTableOlap, "should create a new monthly lookup table partition")
-	require.Equal(t, int32(1), creations.V1StatusesOlap, "should create a new monthly statuses partition")
 
 	err = createExternalIdUniqueConstraintsOnMonthlyPartitions(ctx, pool, "v1_lookup_table_olap", twoMonthsAhead)
 	require.NoError(t, err)
@@ -288,22 +287,25 @@ func TestWP3CoreAndOLAPPartitionSlimming(t *testing.T) {
 	assert.Equal(t, int32(1), coreRow.V1Task)
 	assert.Equal(t, int32(1), coreRow.V1LookupTable)
 
-	// Compile-time and runtime verification that CreateOLAPPartitionsRow includes the 5 essential OLAP tables + 2 hash tmp tables
+	// Compile-time and runtime verification that CreateOLAPPartitionsRow only has the 10 active OLAP tables (4 hash + 6 range/monthly)
 	olapRow := sqlcv1.CreateOLAPPartitionsRow{
-		V1TaskEventsOlapTmp:    4,
-		V1TaskStatusUpdatesTmp: 4,
-		V1TasksOlap:            1,
-		V1RunsOlap:             1,
-		V1PayloadsOlap:         1,
-		V1TaskEventsOlap:       1,
-		V1LookupTableOlap:      1,
+		V1TaskEventsOlapTmp:              4,
+		V1TaskStatusUpdatesTmp:           4,
+		V1AggTaskStatusesMinuteDeltaOlap: 4,
+		V1AggTaskEventsMinuteDeltaOlap:   4,
+		V1TasksOlap:                      1,
+		V1RunsOlap:                       1,
+		V1AggTaskStatusesMinuteOlap:      1,
+		V1AggTaskEventsMinuteOlap:        1,
+		V1TaskEventsOlap:                 1,
+		V1LookupTableOlap:                1,
 	}
 	assert.Equal(t, int32(1), olapRow.V1TaskEventsOlap)
 	assert.Equal(t, int32(1), olapRow.V1LookupTableOlap)
 
-	l := zerolog.Nop()
-	shared := &sharedRepository{l: &l, queries: queries}
-	olapRepo := newOLAPRepository(shared, 72*time.Hour, StatusUpdateBatchSizeLimits{}, false).(*OLAPRepositoryImpl)
-	assert.NotNil(t, olapRepo)
-}
+	t.Setenv("SERVER_MANAGE_OPTIONAL_PARTITIONS", "")
+	assert.False(t, shouldManageOptionalStreamPartitions())
 
+	t.Setenv("SERVER_MANAGE_OPTIONAL_PARTITIONS", "true")
+	assert.True(t, shouldManageOptionalStreamPartitions())
+}

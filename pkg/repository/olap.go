@@ -486,12 +486,6 @@ func (r *OLAPRepositoryImpl) createPartitionsForDate(ctx context.Context, tx pgx
 		return err
 	}
 
-	if creations.V1PayloadsOlap > 0 {
-		if err := createExternalIdUniqueConstraintsOnDailyPartitions(ctx, tx, "v1_payloads_olap", date); err != nil {
-			return err
-		}
-	}
-
 	if creations.V1LookupTableOlap > 0 {
 		return createExternalIdUniqueConstraintsOnMonthlyPartitions(ctx, tx, "v1_lookup_table_olap", date)
 	}

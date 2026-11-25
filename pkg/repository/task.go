@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -5934,27 +5936,37 @@ func (r *TaskRepositoryImpl) detachAndDropPartition(ctx context.Context, parentT
 	return nil
 }
 
+func shouldManageOptionalStreamPartitions() bool {
+	if v := strings.TrimSpace(os.Getenv("SERVER_MANAGE_OPTIONAL_PARTITIONS")); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		return err == nil && enabled
+	}
+	return false
+}
+
 // updateStreamMessagePartitions drops shared partitions once the longest
 // retention passes them, and deletes expired messages of shorter-retention tenants.
 func (r *TaskRepositoryImpl) updateStreamMessagePartitions(ctx context.Context) error {
 	now := time.Now().UTC()
 
-	err := runPartitionDDLWithLockTimeout(ctx, r.ddlPool, r.l, func(tx pgx.Tx) error {
-		if err := r.queries.CreateStreamMessagePartitions(ctx, tx, sqlcv1.CreateStreamMessagePartitionsParams{
-			Fromtime: pgtype.Timestamptz{Time: now, Valid: true},
-			Totime:   pgtype.Timestamptz{Time: now.Add(streamMessagePartitionsAhead), Valid: true},
-		}); err != nil {
+	if shouldManageOptionalStreamPartitions() {
+		err := runPartitionDDLWithLockTimeout(ctx, r.ddlPool, r.l, func(tx pgx.Tx) error {
+			if err := r.queries.CreateStreamMessagePartitions(ctx, tx, sqlcv1.CreateStreamMessagePartitionsParams{
+				Fromtime: pgtype.Timestamptz{Time: now, Valid: true},
+				Totime:   pgtype.Timestamptz{Time: now.Add(streamMessagePartitionsAhead), Valid: true},
+			}); err != nil {
+				return err
+			}
+
+			return r.queries.CreateStreamPayloadPartitions(ctx, tx, sqlcv1.CreateStreamPayloadPartitionsParams{
+				Fromtime: pgtype.Timestamptz{Time: now, Valid: true},
+				Totime:   pgtype.Timestamptz{Time: now.Add(streamMessagePartitionsAhead), Valid: true},
+			})
+		})
+
+		if err != nil {
 			return err
 		}
-
-		return r.queries.CreateStreamPayloadPartitions(ctx, tx, sqlcv1.CreateStreamPayloadPartitionsParams{
-			Fromtime: pgtype.Timestamptz{Time: now, Valid: true},
-			Totime:   pgtype.Timestamptz{Time: now.Add(streamMessagePartitionsAhead), Valid: true},
-		})
-	})
-
-	if err != nil {
-		return err
 	}
 
 	defaultHours := r.m.DefaultStreamRetentionHours()
