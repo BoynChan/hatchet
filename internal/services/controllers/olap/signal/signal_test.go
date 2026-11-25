@@ -57,6 +57,14 @@ func (f *fakeTenantRepo) GetTenantByID(_ context.Context, _ uuid.UUID) (*sqlcv1.
 	return f.tenant, nil
 }
 
+type fakePayloadStore struct {
+	v1.PayloadStoreRepository
+}
+
+func (f *fakePayloadStore) PayloadConsolidationEnabled() bool {
+	return false
+}
+
 type fakeRepo struct {
 	v1.Repository
 	tenantRepo v1.TenantRepository
@@ -64,6 +72,10 @@ type fakeRepo struct {
 
 func (f *fakeRepo) Tenant() v1.TenantRepository {
 	return f.tenantRepo
+}
+
+func (f *fakeRepo) Payloads() v1.PayloadStoreRepository {
+	return &fakePayloadStore{}
 }
 
 func TestSignalTasksCreated_SkipsTenantStreamByDefault(t *testing.T) {

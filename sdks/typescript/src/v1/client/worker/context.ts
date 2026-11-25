@@ -19,6 +19,7 @@ import type { Action } from '@hatchet/clients/dispatcher/action';
 import { workflowNameFromAction } from '@hatchet/clients/dispatcher/action';
 import { Logger, LogLevel } from '@hatchet/util/logger';
 import { parseJSON } from '@hatchet/util/parse';
+import { serializePayload } from '@hatchet/util/serialize-payload';
 import WorkflowRunRef from '@hatchet/util/workflow-run-ref';
 import { Conditions, Render } from '@hatchet/v1/conditions';
 import { conditionsToPb } from '@hatchet/v1/conditions/transformer';
@@ -27,6 +28,7 @@ import { JsonObject, OutputType } from '@hatchet/v1/types';
 import { Action as ConditionAction } from '@hatchet/protoc/v1/shared/condition';
 import type { HatchetClient } from '@hatchet/v1/client/client';
 import { applyNamespace } from '@hatchet/util/apply-namespace';
+import { convertDesiredWorkerLabels } from '@hatchet/clients/admin/trigger-request';
 import { createAbortError, rethrowIfAborted } from '@hatchet/util/abort-error';
 import { parentRunContextManager } from '@hatchet/v1/parent-run-context-vars';
 import type { NextStep } from '@hatchet-dev/typescript-sdk/legacy/step';
@@ -510,6 +512,21 @@ export class Context<T, K = {}> {
   }
 
   /**
+   * Pauses a rate limit key, so queued runs that consume it stay queued until `opts.until`.
+   * Runs that are already executing, including this one, are unaffected.
+   * @param key - The rendered rate limit key to pause.
+   * @param opts - The time to pause the key until. An earlier time never shortens an existing pause.
+   * @returns A promise that resolves to the time the key is paused until.
+   */
+  async pauseRateLimit(key: string, opts: { until: Date }): Promise<Date> {
+    if (!this.runtime.pauseRateLimit) {
+      throw new HatchetError('this runtime does not support pausing rate limits');
+    }
+
+    return this.runtime.pauseRateLimit(key, opts.until);
+  }
+
+  /**
    * Streams data from the current task run.
    * @param data - The data to stream (string or binary).
    * @returns A promise that resolves when the data has been streamed.
@@ -850,7 +867,7 @@ export class Context<T, K = {}> {
 
       return resp;
     } catch (e: any) {
-      throw new HatchetError(e.message);
+      throw new HatchetError(e.message, { cause: e });
     }
   }
 
@@ -902,7 +919,7 @@ export class Context<T, K = {}> {
 
       return resp;
     } catch (e: any) {
-      throw new HatchetError(e.message);
+      throw new HatchetError(e.message, { cause: e });
     }
   }
 
@@ -1272,17 +1289,19 @@ export class DurableContext<T, K = {}> extends Context<T, K> {
 
     const triggerOpts = {
       name: workflowName,
-      input: JSON.stringify(input || {}),
+      input: serializePayload(input || {}),
       parentId: this.action.workflowRunId,
       parentTaskRunExternalId: this.action.taskRunExternalId,
       childIndex,
       childKey: options?.key,
       additionalMetadata: options?.additionalMetadata
-        ? JSON.stringify(options.additionalMetadata)
+        ? serializePayload(options.additionalMetadata)
         : undefined,
       desiredWorkerId: options?.sticky ? this.worker.id() : undefined,
       priority: options?.priority,
-      desiredWorkerLabels: {},
+      desiredWorkerLabels: options?.desiredWorkerLabels
+        ? convertDesiredWorkerLabels(options.desiredWorkerLabels)
+        : {},
     };
 
     return { workflowName, triggerOpts };
@@ -1408,7 +1427,7 @@ export class DurableContext<T, K = {}> extends Context<T, K> {
     }
 
     const result = await fn();
-    const serializedResult = new TextEncoder().encode(JSON.stringify(result));
+    const serializedResult = new TextEncoder().encode(serializePayload(result));
 
     await this._durableListener.sendMemoCompletedNotification(
       this.action.taskRunExternalId,

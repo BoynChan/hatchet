@@ -13,7 +13,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func PrepareTx(ctx context.Context, pool *pgxpool.Pool, l *zerolog.Logger) (pgx.Tx, func(context.Context) error, func(), error) {
+// Pool is the subset of a pgx pool used to start a transaction. *pgxpool.Pool
+// and a fairpool.Handle (ForTenant or ForShared) both satisfy it.
+type Pool interface {
+	Begin(context.Context) (pgx.Tx, error)
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	Stat() *pgxpool.Stat
+}
+
+func PrepareTx(ctx context.Context, pool Pool, l *zerolog.Logger) (pgx.Tx, func(context.Context) error, func(), error) {
 	start := time.Now()
 
 	tx, err := pool.Begin(ctx)
@@ -45,7 +53,7 @@ func PrepareTx(ctx context.Context, pool *pgxpool.Pool, l *zerolog.Logger) (pgx.
 	return tx, tx.Commit, rollback, nil
 }
 
-func PrepareTxWithStatementTimeout(ctx context.Context, pool *pgxpool.Pool, l *zerolog.Logger, timeoutMs int, opts ...pgx.TxOptions) (pgx.Tx, func(context.Context) error, func(), error) {
+func PrepareTxWithStatementTimeout(ctx context.Context, pool Pool, l *zerolog.Logger, timeoutMs int, opts ...pgx.TxOptions) (pgx.Tx, func(context.Context) error, func(), error) {
 	start := time.Now()
 
 	txOpts := pgx.TxOptions{}
@@ -75,47 +83,37 @@ func PrepareTxWithStatementTimeout(ctx context.Context, pool *pgxpool.Pool, l *z
 		).Caller(1).Msg("long transaction start")
 	}
 
-	commit := func(ctx context.Context) error {
-		// reset statement and idle-in-transaction timeouts
-		_, err = tx.Exec(ctx, "SET statement_timeout=30000")
-
-		if err != nil {
-			return err
-		}
-
-		_, err = tx.Exec(ctx, "SET idle_in_transaction_session_timeout=30000")
-
-		if err != nil {
-			return err
-		}
-
-		return tx.Commit(ctx)
-	}
-
 	rollback := func() {
 		DeferRollback(ctx, l, tx.Rollback)
 	}
 
-	_, err = tx.Exec(ctx, fmt.Sprintf("SET statement_timeout=%d", timeoutMs))
+	_, err = tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout=%d", timeoutMs))
 
 	if err != nil {
 		rollback()
 		return nil, nil, nil, err
 	}
 
-	_, err = tx.Exec(ctx, fmt.Sprintf("SET idle_in_transaction_session_timeout=%d", timeoutMs))
+	_, err = tx.Exec(ctx, fmt.Sprintf("SET LOCAL idle_in_transaction_session_timeout=%d", timeoutMs))
 
 	if err != nil {
 		rollback()
 		return nil, nil, nil, err
 	}
 
-	return tx, commit, rollback, nil
+	return tx, tx.Commit, rollback, nil
+}
+
+// rawAcquirer is implemented by *pgxpool.Pool. The DDL pool stays on that concrete
+// pool, so statement-timeout acquires are not counted against a tenant.
+type rawAcquirer interface {
+	Acquire(context.Context) (*pgxpool.Conn, error)
+	Stat() *pgxpool.Stat
 }
 
 // AcquireConnectionWithStatementTimeout acquires a connection from the pool and overwrites the default statement timeout on it.
 // It does not support timeout values lower than the default timeout (if called with such a value, it will just use the default timeout).
-func AcquireConnectionWithStatementTimeout(ctx context.Context, pool *pgxpool.Pool, l *zerolog.Logger, timeoutMs int) (*pgx.Conn, func(), error) {
+func AcquireConnectionWithStatementTimeout(ctx context.Context, pool rawAcquirer, l *zerolog.Logger, timeoutMs int) (*pgx.Conn, func(), error) {
 	start := time.Now()
 
 	conn, err := pool.Acquire(ctx)

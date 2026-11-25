@@ -15,8 +15,8 @@ import (
 	"github.com/google/uuid"
 	tracev1 "go.opentelemetry.io/proto/otlp/trace/v1"
 
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
-	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
 type engineSpanEvent struct {
@@ -27,7 +27,7 @@ type engineSpanEvent struct {
 	stepReadableID     string
 	actionID           string
 	displayName        string
-	eventType          sqlcv1.V1EventTypeOlap
+	eventType          enums.V1EventTypeOlap
 	additionalMetadata []byte
 	taskID             int64
 	retryCount         int32
@@ -419,18 +419,37 @@ func (tc *OLAPControllerImpl) synthesizeEngineSpans(ctx context.Context, tenantI
 			continue
 		}
 		switch e.eventType {
-		case sqlcv1.V1EventTypeOlapSTARTED:
+		case enums.V1EventTypeOlapSTARTED:
 			batchStartedTimes[taskRetryKey{e.taskID, e.retryCount}] = e.eventTimestamp
-		case sqlcv1.V1EventTypeOlapSENTTOWORKER:
+		case enums.V1EventTypeOlapSENTTOWORKER:
 			if span := tc.buildQueuedSpan(tenantId, e); span != nil {
 				queuedSpans = append(queuedSpans, span)
 			}
-		case sqlcv1.V1EventTypeOlapFINISHED,
-			sqlcv1.V1EventTypeOlapFAILED,
-			sqlcv1.V1EventTypeOlapCANCELLED,
-			sqlcv1.V1EventTypeOlapTIMEDOUT,
-			sqlcv1.V1EventTypeOlapSCHEDULINGTIMEDOUT:
+		case enums.V1EventTypeOlapFINISHED,
+			enums.V1EventTypeOlapFAILED,
+			enums.V1EventTypeOlapCANCELLED,
+			enums.V1EventTypeOlapTIMEDOUT,
+			enums.V1EventTypeOlapSCHEDULINGTIMEDOUT:
 			terminalEvents = append(terminalEvents, e)
+		case enums.V1EventTypeOlapRETRYING,
+			enums.V1EventTypeOlapREASSIGNED,
+			enums.V1EventTypeOlapRETRIEDBYUSER,
+			enums.V1EventTypeOlapCREATED,
+			enums.V1EventTypeOlapQUEUED,
+			enums.V1EventTypeOlapREQUEUEDNOWORKER,
+			enums.V1EventTypeOlapREQUEUEDRATELIMIT,
+			enums.V1EventTypeOlapASSIGNED,
+			enums.V1EventTypeOlapACKNOWLEDGED,
+			enums.V1EventTypeOlapSLOTRELEASED,
+			enums.V1EventTypeOlapTIMEOUTREFRESHED,
+			enums.V1EventTypeOlapRATELIMITERROR,
+			enums.V1EventTypeOlapSKIPPED,
+			enums.V1EventTypeOlapCOULDNOTSENDTOWORKER,
+			enums.V1EventTypeOlapDURABLEEVICTED,
+			enums.V1EventTypeOlapDURABLERESTORING,
+			enums.V1EventTypeOlapBATCHBUFFERED,
+			enums.V1EventTypeOlapWAITINGFORBATCH,
+			enums.V1EventTypeOlapBATCHFLUSHED:
 		}
 	}
 
@@ -507,7 +526,7 @@ func (tc *OLAPControllerImpl) buildStepRunSpans(ctx context.Context, tenantId uu
 
 		statusCode := tracev1.Status_STATUS_CODE_OK
 		var statusMessage string
-		if e.eventType != sqlcv1.V1EventTypeOlapFINISHED {
+		if e.eventType != enums.V1EventTypeOlapFINISHED {
 			statusCode = tracev1.Status_STATUS_CODE_ERROR
 			statusMessage = stepRunStatusMessage(e)
 		}
@@ -561,14 +580,37 @@ func stepRunStatusMessage(e engineSpanEvent) string {
 		return e.eventMessage
 	}
 	switch e.eventType {
-	case sqlcv1.V1EventTypeOlapCANCELLED:
+	case enums.V1EventTypeOlapCANCELLED:
 		return "task cancelled"
-	case sqlcv1.V1EventTypeOlapTIMEDOUT:
+	case enums.V1EventTypeOlapTIMEDOUT:
 		return "task timed out"
-	case sqlcv1.V1EventTypeOlapSCHEDULINGTIMEDOUT:
+	case enums.V1EventTypeOlapSCHEDULINGTIMEDOUT:
 		return "scheduling timed out"
-	case sqlcv1.V1EventTypeOlapFAILED:
+	case enums.V1EventTypeOlapFAILED:
 		return "task failed"
+	case enums.V1EventTypeOlapRETRYING,
+		enums.V1EventTypeOlapREASSIGNED,
+		enums.V1EventTypeOlapRETRIEDBYUSER,
+		enums.V1EventTypeOlapCREATED,
+		enums.V1EventTypeOlapQUEUED,
+		enums.V1EventTypeOlapREQUEUEDNOWORKER,
+		enums.V1EventTypeOlapREQUEUEDRATELIMIT,
+		enums.V1EventTypeOlapASSIGNED,
+		enums.V1EventTypeOlapACKNOWLEDGED,
+		enums.V1EventTypeOlapSENTTOWORKER,
+		enums.V1EventTypeOlapSLOTRELEASED,
+		enums.V1EventTypeOlapSTARTED,
+		enums.V1EventTypeOlapTIMEOUTREFRESHED,
+		enums.V1EventTypeOlapFINISHED,
+		enums.V1EventTypeOlapRATELIMITERROR,
+		enums.V1EventTypeOlapSKIPPED,
+		enums.V1EventTypeOlapCOULDNOTSENDTOWORKER,
+		enums.V1EventTypeOlapDURABLEEVICTED,
+		enums.V1EventTypeOlapDURABLERESTORING,
+		enums.V1EventTypeOlapBATCHBUFFERED,
+		enums.V1EventTypeOlapWAITINGFORBATCH,
+		enums.V1EventTypeOlapBATCHFLUSHED:
+		return ""
 	default:
 		return ""
 	}

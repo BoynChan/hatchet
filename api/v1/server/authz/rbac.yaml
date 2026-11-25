@@ -6,8 +6,8 @@ roles:
   ADMIN:
     inherits: [MEMBER]
     permissions:
+      - TenantEntitlementsUpdate
       - TenantMemberUpdate
-      - ApiTokenList
       - ApiTokenCreate
       - ApiTokenUpdateRevoke
       - TenantInviteList
@@ -18,6 +18,7 @@ roles:
   MEMBER:
     inherits: [VIEWER]
     permissions:
+      - ApiTokenList
       - StepRunUpdateCancel
       - TenantUpdate
       - WorkflowRunUpdateReplay
@@ -48,6 +49,8 @@ roles:
       - V1FilterDelete
       - V1FilterUpdate
       - SlackWebhookDelete
+      - UserUpdateSlackOauthStart
+      - UserUpdateSlackOauthCallback
       - TenantMemberDelete
       - WorkflowScheduledDelete
       - WorkflowScheduledUpdate
@@ -66,6 +69,9 @@ roles:
       - WorkflowCronTrigger
       - WorkflowScheduledTrigger
       - V1FilterUpdate
+      - V1ServerlessEndpointCreate
+      - V1ServerlessEndpointUpdate
+      - V1ServerlessEndpointDelete
   VIEWER:
     permissions:
       - TenantAlertingSettingsGet
@@ -79,7 +85,11 @@ roles:
       - TenantInviteReject
       - V1LogLineList
       - V1StreamPayloadGet
+      - V1StreamTopicList
       - V1WebhookGet
+      - V1ServerlessEndpointList
+      - V1ServerlessEndpointGet
+      - V1ServerlessEndpointEventList
       - V1WebhookReceive
       - V1WorkflowRunList
       - V1EventKeyList
@@ -116,7 +126,6 @@ roles:
       - WebhookList
       - CloudMetadataGet
       - UserUpdateGoogleOauthCallback
-      - UserUpdateSlackOauthCallback
       - V1WorkflowRunDisplayNamesList
       - SlackWebhookList
       - V1TaskGet
@@ -130,11 +139,13 @@ roles:
       - UserUpdateGithubOauthStart
       - V1WebhookList
       - V1FilterList
+      - V1ConcurrencyStrategyList
+      - V1ConcurrencyKeyList
       - TenantGetStepRunQueueMetrics
       - UserUpdateLogin
       - V1FilterGet
       - TenantResourcePolicyGet
-      - UserUpdateSlackOauthStart
+      - TenantEntitlementsGet
       - UserUpdateGoogleOauthStart
       - V1CelDebug
       - V1WorkflowRunGetTimings

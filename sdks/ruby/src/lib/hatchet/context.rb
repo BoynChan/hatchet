@@ -108,7 +108,8 @@ module Hatchet
     # @param task_ref [Task, Symbol, String] Reference to the parent task
     # @return [Boolean] true if the task was skipped
     def was_skipped?(task_ref)
-      task_output(task_ref).nil?
+      output = task_output(task_ref)
+      output.is_a?(Hash) && (output["skipped"] == true || output[:skipped] == true)
     end
 
     # Log a message via the Hatchet logging system.
@@ -186,6 +187,19 @@ module Hatchet
       return unless @dispatcher_client && @step_run_id
 
       @dispatcher_client.release_slot(step_run_id: @step_run_id)
+    end
+
+    # Pause a rate limit key until the given time.
+    # Queued runs that consume it stay queued, while runs that are already executing, including this one, are unaffected.
+    #
+    # @param key [String] The rendered rate limit key to pause
+    # @param until_time [Time] The time to pause the key until. An earlier time never shortens an existing pause.
+    # @return [Time] The time the key is paused until
+    # @raise [Hatchet::Error] If the context has no client to pause with
+    def pause_rate_limit(key, until_time:)
+      raise Hatchet::Error, "cannot pause a rate limit without a client" unless @client
+
+      @client.admin_grpc.pause_rate_limit(key: key, until_time: until_time)
     end
 
     # Put a stream chunk for real-time streaming output.

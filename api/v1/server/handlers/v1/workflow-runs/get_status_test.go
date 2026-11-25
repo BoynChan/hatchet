@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hatchet-dev/hatchet/api/v1/server/oas/gen"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
-	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
 func TestV1WorkflowRunGetStatus_UsesLightweightPopulatorContext(t *testing.T) {
@@ -27,7 +27,7 @@ func TestV1WorkflowRunGetStatus_UsesLightweightPopulatorContext(t *testing.T) {
 	c.Set("v1-workflow-run-status", &v1.V1WorkflowRunPopulator{
 		WorkflowRun: &v1.WorkflowRunData{
 			ExternalID:     runID,
-			ReadableStatus: sqlcv1.V1ReadableStatusOlapCOMPLETED,
+			ReadableStatus: enums.V1ReadableStatusOlapCOMPLETED,
 		},
 	})
 
@@ -36,7 +36,7 @@ func TestV1WorkflowRunGetStatus_UsesLightweightPopulatorContext(t *testing.T) {
 		V1WorkflowRun: runID,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, gen.V1WorkflowRunGetStatus200JSONResponse(gen.V1TaskStatusCOMPLETED), resp)
+	assert.Equal(t, gen.V1WorkflowRunGetStatus200JSONResponse(enums.V1ReadableStatusOlapCOMPLETED), resp)
 }
 
 func TestV1WorkflowRunGetStatus_MapsEvictedToRunning(t *testing.T) {
@@ -49,7 +49,7 @@ func TestV1WorkflowRunGetStatus_MapsEvictedToRunning(t *testing.T) {
 	c.Set("v1-workflow-run-status", &v1.V1WorkflowRunPopulator{
 		WorkflowRun: &v1.WorkflowRunData{
 			ExternalID:     runID,
-			ReadableStatus: sqlcv1.V1ReadableStatusOlapEVICTED,
+			ReadableStatus: enums.V1ReadableStatusOlapEVICTED,
 		},
 	})
 
@@ -58,5 +58,5 @@ func TestV1WorkflowRunGetStatus_MapsEvictedToRunning(t *testing.T) {
 		V1WorkflowRun: runID,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, gen.V1WorkflowRunGetStatus200JSONResponse(gen.V1TaskStatusRUNNING), resp)
+	assert.Equal(t, gen.V1WorkflowRunGetStatus200JSONResponse(enums.V1ReadableStatusOlapRUNNING), resp)
 }

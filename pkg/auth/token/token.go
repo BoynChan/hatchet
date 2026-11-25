@@ -17,7 +17,7 @@ import (
 var ErrCouldNotReadTokenFromDatabase = errors.New("could not read token from database")
 
 type JWTManager interface {
-	GenerateTenantToken(ctx context.Context, tenantId uuid.UUID, name string, internal bool, expires *time.Time) (*Token, error)
+	GenerateTenantToken(ctx context.Context, tenantId uuid.UUID, name string, internal bool, readOnly bool, expires *time.Time) (*Token, error)
 	ValidateTenantToken(ctx context.Context, token string) (uuid.UUID, uuid.UUID, error)
 }
 
@@ -85,7 +85,7 @@ func (j *jwtManagerImpl) createToken(ctx context.Context, tenantId uuid.UUID, na
 	}, nil
 }
 
-func (j *jwtManagerImpl) GenerateTenantToken(ctx context.Context, tenantId uuid.UUID, name string, internal bool, expires *time.Time) (*Token, error) {
+func (j *jwtManagerImpl) GenerateTenantToken(ctx context.Context, tenantId uuid.UUID, name string, internal bool, readOnly bool, expires *time.Time) (*Token, error) {
 	token, err := j.createToken(ctx, tenantId, name, nil, expires)
 	if err != nil {
 		return nil, err
@@ -98,6 +98,7 @@ func (j *jwtManagerImpl) GenerateTenantToken(ctx context.Context, tenantId uuid.
 		TenantId:  &tenantId,
 		Name:      &name,
 		Internal:  internal,
+		ReadOnly:  readOnly,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to write token to database: %v", err)
@@ -191,6 +192,10 @@ func (j *jwtManagerImpl) ValidateTenantToken(ctx context.Context, token string) 
 
 	if err != nil {
 		return uuid.Nil, uuid.Nil, fmt.Errorf("failed to parse subject claim: %v", err)
+	}
+
+	if dbToken.TenantId == nil || *dbToken.TenantId != parsedSubject {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("subject claim does not match token tenant_id")
 	}
 
 	return parsedSubject, dbToken.ID, nil

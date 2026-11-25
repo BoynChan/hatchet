@@ -22,7 +22,8 @@ func newHealthRepository(shared *sharedRepository) HealthRepository {
 }
 
 func (a *healthRepository) IsHealthy(ctx context.Context) bool {
-	_, err := a.queries.Health(ctx, a.pool)
+	// Readiness reads on the raw pool so a shared bucket at its cap does not take the process out of service.
+	_, err := a.queries.Health(ctx, a.pool.Unwrap())
 
 	if err != nil { //nolint:staticcheck
 		a.l.Err(err).Ctx(ctx).Msg("health check failed")

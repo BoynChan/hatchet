@@ -314,7 +314,7 @@ func transports() []transport {
 
 type testJWTManager struct{}
 
-func (testJWTManager) GenerateTenantToken(context.Context, uuid.UUID, string, bool, *time.Time) (*token.Token, error) {
+func (testJWTManager) GenerateTenantToken(context.Context, uuid.UUID, string, bool, bool, *time.Time) (*token.Token, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -506,7 +506,7 @@ func TestGRPCClientCompatibility(t *testing.T) {
 
 				_, err := client.Register(authCtx(t, validToken), &dispatchercontracts.WorkerRegisterRequest{WorkerName: "panic"})
 				assert.Equal(t, codes.Internal, status.Code(err))
-				assert.Equal(t, "An internal error occurred", status.Convert(err).Message())
+				assert.Equal(t, "An internal error occurred.", status.Convert(err).Message())
 				assert.Equal(t, before+1, env.alerter.n.Load())
 
 				_, err = client.Register(authCtx(t, validToken), &dispatchercontracts.WorkerRegisterRequest{WorkerName: "w"})
@@ -1136,3 +1136,10 @@ func newTestPKI(t *testing.T) *testPKI {
 		clientCert: leaf(3, x509.ExtKeyUsageClientAuth),
 	}
 }
+
+type fakeAPITokenRepo struct{ v1.APITokenRepository }
+
+func (fakeAPITokenRepo) GetAPITokenById(_ context.Context, id uuid.UUID) (*sqlcv1.APIToken, error) {
+	return &sqlcv1.APIToken{ID: id}, nil
+}
+func (fakeRepository) APIToken() v1.APITokenRepository { return fakeAPITokenRepo{} }

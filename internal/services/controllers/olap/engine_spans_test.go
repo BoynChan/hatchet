@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
@@ -243,7 +244,7 @@ func TestWriteEngineSpans_DefaultDisabledAndEnvToggle(t *testing.T) {
 			insertedAt:     now,
 			taskInsertedAt: now,
 			eventTimestamp: now,
-			eventType:      sqlcv1.V1EventTypeOlapFINISHED,
+			eventType:      enums.V1EventTypeOlapFINISHED,
 			externalID:     uuid.New(),
 			workflowRunID:  wfRunID,
 		},

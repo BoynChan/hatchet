@@ -260,7 +260,7 @@ func (p *PubSub) Pub(ctx context.Context, topic msgqueue.Topic, msg *msgqueue.Me
 		expiration = tenantStreamMsgTTL
 	}
 
-	if isFanout(topic) {
+	if topic.Kind().Fanout() {
 		// fanout topics ride a fanout exchange; declare it lazily
 		if _, ok := p.exchangeCache.Get(topic.Name()); !ok {
 			if err := p.declareExchange(pub, topic.Name()); err != nil {
@@ -421,12 +421,6 @@ func (p *PubSub) Sub(topic msgqueue.Topic, handler msgqueue.MsgHandler) (func() 
 	return cleanup, nil
 }
 
-// isFanout topics reach every subscriber; others are one queue whose
-// subscribers compete.
-func isFanout(topic msgqueue.Topic) bool {
-	return topic.Kind() == msgqueue.TopicKindTenantStream || topic.Kind() == msgqueue.TopicKindStreamWake
-}
-
 // subQueueDeclareArgs builds the AMQP arguments for PubSub subscriber queues.
 // PubSub queues are always non-durable (durable=false, autoDelete=true,
 // exclusive=true), so x-consumer-timeout must be omitted: RabbitMQ 4.3+
@@ -434,7 +428,6 @@ func isFanout(topic msgqueue.Topic) bool {
 func subQueueDeclareArgs() amqp.Table {
 	return make(amqp.Table)
 }
-
 // declareSubQueue declares the consumer queue for a topic and returns its
 // name. Fanout topics get a random-suffix exclusive queue bound to their
 // fanout exchange; scheduler topics consume the well-known partition queue on
@@ -444,7 +437,7 @@ func (p *PubSub) declareSubQueue(ch *amqp.Channel, topic msgqueue.Topic) (string
 
 	name := topic.Name()
 
-	if isFanout(topic) {
+	if topic.Kind().Fanout() {
 		if err := p.declareExchange(ch, topic.Name()); err != nil {
 			return "", err
 		}
@@ -464,7 +457,7 @@ func (p *PubSub) declareSubQueue(ch *amqp.Channel, topic msgqueue.Topic) (string
 		return "", err
 	}
 
-	if isFanout(topic) {
+	if topic.Kind().Fanout() {
 		p.l.Debug().Msgf("binding queue: %s to exchange: %s", name, topic.Name())
 
 		if err := ch.QueueBind(name, "", topic.Name(), false, nil); err != nil {

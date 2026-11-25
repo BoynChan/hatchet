@@ -5,20 +5,21 @@ import (
 
 	"github.com/hatchet-dev/hatchet/api/v1/server/oas/gen"
 	"github.com/hatchet-dev/hatchet/pkg/auth/rbac"
-	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 
 	"github.com/stretchr/testify/assert"
 )
 
 var adminAndOwnerOnly = []string{
+	"TenantEntitlementsUpdate",
 	"TenantInviteList",
 	"TenantInviteCreate",
 	"TenantInviteUpdate",
 	"TenantInviteDelete",
 	"TenantMemberList",
 	"TenantMemberUpdate",
-	// members cannot create API tokens for a tenant, because they have admin permissions
-	"ApiTokenList",
+	// members can list API tokens (read-only) but cannot create or revoke them, because
+	// tokens carry admin-level permissions
 	"ApiTokenCreate",
 	"ApiTokenUpdateRevoke",
 }
@@ -27,6 +28,7 @@ var adminAndOwnerOnly = []string{
 // anything that triggers, creates, updates, deletes, cancels, replays, or reruns tenant state.
 // Keep this in sync with the exclusions applied when building the VIEWER permission list in rbac.yaml.
 var memberOnlyOps = []string{
+	"ApiTokenList",
 	"StepRunUpdateCancel",
 	"TenantUpdate",
 	"WorkflowRunUpdateReplay",
@@ -57,6 +59,8 @@ var memberOnlyOps = []string{
 	"V1FilterDelete",
 	"V1FilterUpdate",
 	"SlackWebhookDelete",
+	"UserUpdateSlackOauthStart",
+	"UserUpdateSlackOauthCallback",
 	"TenantMemberDelete",
 	"WorkflowScheduledDelete",
 	"WorkflowScheduledUpdate",
@@ -74,6 +78,9 @@ var memberOnlyOps = []string{
 	"WorkflowCronUpdate",
 	"WorkflowCronTrigger",
 	"WorkflowScheduledTrigger",
+	"V1ServerlessEndpointCreate",
+	"V1ServerlessEndpointUpdate",
+	"V1ServerlessEndpointDelete",
 }
 
 func operationIdsFromSpec() []string {
@@ -92,12 +99,12 @@ func TestAuthorizeTenantOperations(t *testing.T) {
 	assert.Nil(t, err)
 	allOperations := operationIdsFromSpec()
 	for _, operationId := range allOperations {
-		assert.Equal(t, r.IsAuthorized(string(sqlcv1.TenantMemberRoleADMIN), operationId), true)
-		assert.Equal(t, r.IsAuthorized(string(sqlcv1.TenantMemberRoleOWNER), operationId), true)
+		assert.Equal(t, r.IsAuthorized(string(enums.TenantMemberRoleADMIN), operationId), true)
+		assert.Equal(t, r.IsAuthorized(string(enums.TenantMemberRoleOWNER), operationId), true)
 		if rbac.OperationIn(operationId, adminAndOwnerOnly) {
-			assert.Equal(t, r.IsAuthorized(string(sqlcv1.TenantMemberRoleMEMBER), operationId), false)
+			assert.Equal(t, r.IsAuthorized(string(enums.TenantMemberRoleMEMBER), operationId), false)
 		} else {
-			assert.Equal(t, r.IsAuthorized(string(sqlcv1.TenantMemberRoleMEMBER), operationId), true)
+			assert.Equal(t, r.IsAuthorized(string(enums.TenantMemberRoleMEMBER), operationId), true)
 		}
 	}
 }
@@ -111,7 +118,7 @@ func TestAuthorizeTenantOperationsViewer(t *testing.T) {
 		assert.Equal(
 			t,
 			expectAuthorized,
-			r.IsAuthorized(string(sqlcv1.TenantMemberRoleVIEWER), operationId),
+			r.IsAuthorized(string(enums.TenantMemberRoleVIEWER), operationId),
 			"operationId: %s", operationId,
 		)
 	}
@@ -134,7 +141,7 @@ func TestAuthorizeTenantOperationsViewerRepresentativeSample(t *testing.T) {
 		"TenantCreate",
 	}
 	for _, operationId := range deniedForViewer {
-		assert.False(t, r.IsAuthorized(string(sqlcv1.TenantMemberRoleVIEWER), operationId), "operationId: %s", operationId)
+		assert.False(t, r.IsAuthorized(string(enums.TenantMemberRoleVIEWER), operationId), "operationId: %s", operationId)
 	}
 
 	allowedForViewer := []string{
@@ -149,11 +156,35 @@ func TestAuthorizeTenantOperationsViewerRepresentativeSample(t *testing.T) {
 		"UserUpdateLogout",
 	}
 	for _, operationId := range allowedForViewer {
-		assert.True(t, r.IsAuthorized(string(sqlcv1.TenantMemberRoleVIEWER), operationId), "operationId: %s", operationId)
+		assert.True(t, r.IsAuthorized(string(enums.TenantMemberRoleVIEWER), operationId), "operationId: %s", operationId)
 	}
 }
 
 func TestValidateSpec(t *testing.T) {
 	_, err := newHatchetAuthorizer()
 	assert.Nil(t, err)
+}
+
+func TestAuthorizeApiTokenOperationsByRole(t *testing.T) {
+	r, err := newHatchetAuthorizer()
+	assert.Nil(t, err)
+
+	cases := []struct {
+		role   enums.TenantMemberRole
+		list   bool
+		create bool
+		revoke bool
+	}{
+		{enums.TenantMemberRoleOWNER, true, true, true},
+		{enums.TenantMemberRoleADMIN, true, true, true},
+		{enums.TenantMemberRoleMEMBER, true, false, false},
+		{enums.TenantMemberRoleVIEWER, false, false, false},
+	}
+
+	for _, c := range cases {
+		role := string(c.role)
+		assert.Equal(t, c.list, r.IsAuthorized(role, "ApiTokenList"), "role %s: ApiTokenList", role)
+		assert.Equal(t, c.create, r.IsAuthorized(role, "ApiTokenCreate"), "role %s: ApiTokenCreate", role)
+		assert.Equal(t, c.revoke, r.IsAuthorized(role, "ApiTokenUpdateRevoke"), "role %s: ApiTokenUpdateRevoke", role)
+	}
 }

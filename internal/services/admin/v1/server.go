@@ -10,11 +10,9 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
-	"github.com/jackc/pgerrcode"
-	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/hatchet-dev/hatchet/internal/listutils"
+	"github.com/hatchet-dev/hatchet/internal/enumerables"
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
 	"github.com/hatchet-dev/hatchet/internal/services/controllers/task/trigger"
 	contracts "github.com/hatchet-dev/hatchet/internal/services/shared/proto/v1"
@@ -22,6 +20,7 @@ import (
 	"github.com/hatchet-dev/hatchet/internal/statusutils"
 	"github.com/hatchet-dev/hatchet/pkg/analytics"
 	"github.com/hatchet-dev/hatchet/pkg/client/types"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 
@@ -48,28 +47,18 @@ func (a *AdminServiceImpl) CancelTasks(ctx context.Context, req *contracts.Cance
 	}
 
 	if len(externalIds) == 0 && req.Filter != nil {
+		statuses, err := v1.ReadableStatusesForFilter(req.Filter.Statuses, v1.RunningStatusFilterAll)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+
 		var (
-			statuses = []sqlcv1.V1ReadableStatusOlap{
-				sqlcv1.V1ReadableStatusOlapQUEUED,
-				sqlcv1.V1ReadableStatusOlapRUNNING,
-				sqlcv1.V1ReadableStatusOlapFAILED,
-				sqlcv1.V1ReadableStatusOlapCOMPLETED,
-				sqlcv1.V1ReadableStatusOlapCANCELLED,
-			}
 			since       = req.Filter.Since.AsTime()
 			until       *time.Time
 			workflowIds       = []uuid.UUID{}
 			limit       int64 = 20000
 			offset      int64
 		)
-
-		if len(req.Filter.Statuses) > 0 {
-			statuses = []sqlcv1.V1ReadableStatusOlap{}
-
-			for _, status := range req.Filter.Statuses {
-				statuses = append(statuses, sqlcv1.V1ReadableStatusOlap(status))
-			}
-		}
 
 		if len(req.Filter.WorkflowIds) > 0 {
 			for _, id := range req.Filter.WorkflowIds {
@@ -196,28 +185,18 @@ func (a *AdminServiceImpl) ReplayTasks(ctx context.Context, req *contracts.Repla
 	}
 
 	if len(externalIds) == 0 && req.Filter != nil {
+		statuses, err := v1.ReadableStatusesForFilter(req.Filter.Statuses, v1.RunningStatusFilterAll)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+
 		var (
-			statuses = []sqlcv1.V1ReadableStatusOlap{
-				sqlcv1.V1ReadableStatusOlapQUEUED,
-				sqlcv1.V1ReadableStatusOlapRUNNING,
-				sqlcv1.V1ReadableStatusOlapFAILED,
-				sqlcv1.V1ReadableStatusOlapCOMPLETED,
-				sqlcv1.V1ReadableStatusOlapCANCELLED,
-			}
 			since       = req.Filter.Since.AsTime()
 			until       *time.Time
 			workflowIds       = []uuid.UUID{}
 			limit       int64 = 1000
 			offset      int64
 		)
-
-		if len(req.Filter.Statuses) > 0 {
-			statuses = []sqlcv1.V1ReadableStatusOlap{}
-
-			for _, status := range req.Filter.Statuses {
-				statuses = append(statuses, sqlcv1.V1ReadableStatusOlap(status))
-			}
-		}
 
 		if len(req.Filter.WorkflowIds) > 0 {
 			for _, id := range req.Filter.WorkflowIds {
@@ -295,11 +274,11 @@ func (a *AdminServiceImpl) ReplayTasks(ctx context.Context, req *contracts.Repla
 		childExternalIds, err := a.repo.Tasks().ListDurableOrchestratorChildExternalIds(ctx, tenant.ID, task.ExternalID)
 
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to list orchestrator children for replay: %v", err))
+			return nil, fmt.Errorf("failed to list orchestrator children for replay: %w", err)
 		}
 
 		if _, err := a.repo.DurableEvents().HandleBranchForDAGReplay(ctx, tenant.ID, task, childExternalIds); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to branch durable task for replay: %v", err))
+			return nil, fmt.Errorf("failed to branch durable task for replay: %w", err)
 		}
 	}
 
@@ -433,7 +412,7 @@ func (a *AdminServiceImpl) handleOperatorDAGStepReplays(
 	parents, err := a.repo.Tasks().FlattenExternalIds(ctx, tenantId, parentExternalIds)
 
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to look up parent tasks for replay: %v", err))
+		return nil, fmt.Errorf("failed to look up parent tasks for replay: %w", err)
 	}
 
 	orchestrators := make(map[uuid.UUID]*sqlcv1.FlattenExternalIdsRow)
@@ -490,7 +469,7 @@ func (a *AdminServiceImpl) handleOperatorDAGStepReplays(
 		branch, err := a.repo.DurableEvents().HandleBranchForDAGReplay(ctx, tenantId, orchestrator, childExternalIds)
 
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to branch durable task for step replay: %v", err))
+			return nil, fmt.Errorf("failed to branch durable task for step replay: %w", err)
 		}
 
 		if branch == nil {
@@ -519,7 +498,7 @@ func (a *AdminServiceImpl) TriggerWorkflowRun(ctx context.Context, req *contract
 
 	canCreateTR, trLimit, err := a.repo.TenantLimit().CanCreate(
 		ctx,
-		sqlcv1.LimitResourceTASKRUN,
+		enums.LimitResourceTASKRUN,
 		tenantId,
 		// NOTE: this isn't actually the number of tasks per workflow run, but we're just checking to see
 		// if we've exceeded the limit
@@ -569,7 +548,7 @@ func (a *AdminServiceImpl) TriggerWorkflowRun(ctx context.Context, req *contract
 			)
 
 			if err != nil {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to build idempotency collision error: %v", err))
+				return nil, fmt.Errorf("failed to build idempotency collision error: %w", err)
 			}
 
 			collisionErr := connect.NewError(connect.CodeAlreadyExists, errors.New("idempotency key collision"))
@@ -597,13 +576,13 @@ func (a *AdminServiceImpl) BranchDurableTask(ctx context.Context, req *contracts
 
 	task, err := a.repo.Tasks().GetTaskByExternalId(ctx, tenantId, taskExternalId, true)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("task not found: %v", err))
+		return nil, fmt.Errorf("failed to get task: %w", err)
 	}
 
 	result, err := a.repo.DurableEvents().HandleBranch(ctx, tenantId, req.NodeId, req.BranchId, task)
 
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to branch durable task: %v", err))
+		return nil, fmt.Errorf("failed to branch durable task: %w", err)
 	}
 
 	replayPayload := tasktypes.ReplayTasksPayload{
@@ -620,11 +599,11 @@ func (a *AdminServiceImpl) BranchDurableTask(ctx context.Context, req *contracts
 
 	msg, err := msgqueue.NewTenantMessage(tenantId, msgqueue.MsgIDReplayTasks, false, true, replayPayload)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to create replay message: %v", err))
+		return nil, fmt.Errorf("failed to create replay message: %w", err)
 	}
 
 	if err := a.mq.SendMessage(ctx, msgqueue.TASK_PROCESSING_QUEUE, msg); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to send replay message: %v", err))
+		return nil, fmt.Errorf("failed to send replay message: %w", err)
 	}
 
 	return &contracts.BranchDurableTaskResponse{
@@ -691,9 +670,9 @@ func (a *AdminServiceImpl) GetRunDetails(ctx context.Context, req *contracts.Get
 		}
 	}
 
-	done := !listutils.Any(statuses, "QUEUED") && !listutils.Any(statuses, "RUNNING") && !listutils.Any(statuses, "EVICTED")
+	done := !enumerables.Any(statuses, "QUEUED") && !enumerables.Any(statuses, "RUNNING") && !enumerables.Any(statuses, "EVICTED")
 
-	anyEvicted := listutils.Any(statuses, "EVICTED")
+	anyEvicted := enumerables.Any(statuses, "EVICTED")
 
 	derivedStatusPtr, err := derivedWorkflowRunStatus.ToProto()
 
@@ -859,7 +838,9 @@ func (a *AdminServiceImpl) PutWorkflow(ctx context.Context, req *contracts.Creat
 	createOpts, err := getCreateWorkflowOpts(req)
 
 	if err != nil {
-		return nil, err
+		// the request could not be turned into workflow options: a malformed duration,
+		// expression or reference the caller supplied
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
 	// validate createOpts
@@ -884,20 +865,22 @@ func (a *AdminServiceImpl) PutWorkflow(ctx context.Context, req *contracts.Creat
 			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(tenantConcurrencyErr.Error()))
 		}
 
+		// a cycle among the tasks is a property of the workflow as declared; only a changed
+		// declaration can fix it
+		var cycleErr *v1.JobRunHasCycleError
+
+		if errors.As(err, &cycleErr) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(cycleErr.Error()))
+		}
+
 		return nil, err
 	}
 
 	if len(createOpts.CronTriggers) > 0 {
 		msg := tasktypes.NewCronUpdateMessage(tenantId, msgqueue.MsgIDCronUpdate)
-		err = a.mq.SendMessage(ctx, msgqueue.TICKER_UPDATE_QUEUE, msg)
+		err = a.pubsub.Pub(ctx, msgqueue.CronRefreshTopic(), msg)
 		if err != nil {
 			a.l.Err(err).Ctx(ctx).Msg("could not send cron trigger update message")
-		}
-	}
-
-	if currWorkflow.WorkflowVersion.IsUsingDagOperator {
-		if err := a.ensureDAGOperator(ctx, tenantId); err != nil {
-			a.l.Err(err).Ctx(ctx).Msg("could not ensure DAG operator for tenant")
 		}
 	}
 
@@ -943,50 +926,6 @@ func (a *AdminServiceImpl) PutWorkflow(ctx context.Context, req *contracts.Creat
 		Id:         currWorkflow.WorkflowVersion.ID.String(),
 		WorkflowId: currWorkflow.WorkflowVersion.WorkflowId.String(),
 	}, nil
-}
-
-func (a *AdminServiceImpl) ensureDAGOperator(ctx context.Context, tenantId uuid.UUID) error {
-	exists, err := a.repo.Operators().HasDAGOperator(ctx, tenantId)
-
-	if err != nil {
-		return fmt.Errorf("could not check for DAG operator: %w", err)
-	}
-
-	if exists {
-		return nil
-	}
-
-	config, err := json.Marshal(struct{}{})
-
-	if err != nil {
-		return fmt.Errorf("could not marshal DAG operator config: %w", err)
-	}
-
-	// The DAG operator is engine-leased: the claimer assigns the row to a dispatcher and
-	// builds the operator there.
-	_, err = a.repo.Operators().CreateOperator(ctx, tenantId, v1.CreateOperatorOpts{
-		Name:           "default",
-		Kind:           sqlcv1.V1OperatorKindDAG,
-		LeasingManager: sqlcv1.V1OperatorLeasingManagerDISPATCHER,
-		Config:         config,
-	})
-
-	// Two workflows put at once both see no operator and both create one; the row is unique
-	// per (tenant, name, kind), so the second insert loses and the tenant has its operator
-	// either way.
-	if isUniqueViolation(err) {
-		return nil
-	}
-
-	return err
-}
-
-// isUniqueViolation reports whether err is Postgres refusing a row that duplicates a unique
-// index.
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-
-	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation
 }
 
 func getActionsForTasks(tasks []*contracts.CreateTaskOpts) ([]string, error) {
@@ -1035,11 +974,9 @@ func getCreateWorkflowOpts(req *contracts.CreateWorkflowVersionRequest) (*v1.Cre
 		onFailureTask = &onFailureTasks[0]
 	}
 
-	var sticky *string
-
-	if req.Sticky != nil {
-		s := req.Sticky.String()
-		sticky = &s
+	sticky, err := enums.FromProtoPtr[sqlcv1.StickyStrategy](req.Sticky)
+	if err != nil {
+		return nil, err
 	}
 
 	var concurrency []v1.CreateConcurrencyOpts
@@ -1055,11 +992,9 @@ func getCreateWorkflowOpts(req *contracts.CreateWorkflowVersionRequest) (*v1.Cre
 			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("a name is required for tenant-scoped concurrency"))
 		}
 
-		var limitStrategy *string
-
-		if req.Concurrency.LimitStrategy != nil && req.Concurrency.LimitStrategy.String() != "" {
-			s := req.Concurrency.LimitStrategy.String()
-			limitStrategy = &s
+		limitStrategy, err := enums.FromProtoPtr[enums.V1ConcurrencyStrategy](req.Concurrency.LimitStrategy)
+		if err != nil {
+			return nil, err
 		}
 
 		var name string
@@ -1069,7 +1004,7 @@ func getCreateWorkflowOpts(req *contracts.CreateWorkflowVersionRequest) (*v1.Cre
 		}
 
 		concurrency = append(concurrency, v1.CreateConcurrencyOpts{
-			LimitStrategy:     limitStrategy,
+			LimitStrategy:     (*string)(limitStrategy),
 			Expression:        req.Concurrency.Expression,
 			MaxRuns:           req.Concurrency.MaxRuns,
 			Name:              name,
@@ -1089,11 +1024,9 @@ func getCreateWorkflowOpts(req *contracts.CreateWorkflowVersionRequest) (*v1.Cre
 			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("a name is required for tenant-scoped concurrency"))
 		}
 
-		var limitStrategy *string
-
-		if c.LimitStrategy != nil && c.LimitStrategy.String() != "" {
-			s := c.LimitStrategy.String()
-			limitStrategy = &s
+		limitStrategy, err := enums.FromProtoPtr[enums.V1ConcurrencyStrategy](c.LimitStrategy)
+		if err != nil {
+			return nil, err
 		}
 
 		var name string
@@ -1103,7 +1036,7 @@ func getCreateWorkflowOpts(req *contracts.CreateWorkflowVersionRequest) (*v1.Cre
 		}
 
 		concurrency = append(concurrency, v1.CreateConcurrencyOpts{
-			LimitStrategy:     limitStrategy,
+			LimitStrategy:     (*string)(limitStrategy),
 			Expression:        c.Expression,
 			MaxRuns:           c.MaxRuns,
 			Name:              name,
@@ -1146,7 +1079,11 @@ func getCreateWorkflowOpts(req *contracts.CreateWorkflowVersionRequest) (*v1.Cre
 		method := sqlcv1.IdempotencyMethodTTL
 
 		if req.Idempotency.Method != nil {
-			method = sqlcv1.IdempotencyMethod(req.Idempotency.Method.String())
+			m, err := enums.FromProto[sqlcv1.IdempotencyMethod](*req.Idempotency.Method)
+			if err != nil {
+				return nil, err
+			}
+			method = m
 		}
 
 		idempotency = &v1.IdempotencyConfig{
@@ -1165,7 +1102,7 @@ func getCreateWorkflowOpts(req *contracts.CreateWorkflowVersionRequest) (*v1.Cre
 		CronInput:       cronInput,
 		Tasks:           tasks,
 		OnFailure:       onFailureTask,
-		Sticky:          sticky,
+		Sticky:          (*string)(sticky),
 		DefaultPriority: req.DefaultPriority,
 		DefaultFilters:  defaultFilters,
 		InputJsonSchema: req.InputJsonSchema,
@@ -1329,10 +1266,15 @@ func getCreateTaskOpts(tasks []*contracts.CreateTaskOpts, kind string) ([]v1.Cre
 
 					eventKey := userEventCondition.UserEventKey
 
+					action, err := enums.FromProto[sqlcv1.V1MatchConditionAction](userEventCondition.Base.Action)
+					if err != nil {
+						return nil, err
+					}
+
 					steps[j].TriggerConditions = append(steps[j].TriggerConditions, v1.CreateStepMatchConditionOpt{
 						MatchConditionKind: "USER_EVENT",
 						ReadableDataKey:    userEventCondition.Base.ReadableDataKey,
-						Action:             userEventCondition.Base.Action.String(),
+						Action:             string(action),
 						OrGroupId:          orGroupId,
 						Expression:         userEventCondition.Base.Expression,
 						EventKey:           &eventKey,
@@ -1361,10 +1303,15 @@ func getCreateTaskOpts(tasks []*contracts.CreateTaskOpts, kind string) ([]v1.Cre
 						return nil, fmt.Errorf("invalid OrGroupId in SleepCondition for step %s: %w", stepCp.ReadableId, err)
 					}
 
+					action, err := enums.FromProto[sqlcv1.V1MatchConditionAction](sleepCondition.Base.Action)
+					if err != nil {
+						return nil, err
+					}
+
 					steps[j].TriggerConditions = append(steps[j].TriggerConditions, v1.CreateStepMatchConditionOpt{
 						MatchConditionKind: "SLEEP",
 						ReadableDataKey:    sleepCondition.Base.ReadableDataKey,
-						Action:             sleepCondition.Base.Action.String(),
+						Action:             string(action),
 						OrGroupId:          orGroupId,
 						SleepDuration:      &duration,
 					})
@@ -1393,10 +1340,15 @@ func getCreateTaskOpts(tasks []*contracts.CreateTaskOpts, kind string) ([]v1.Cre
 						return nil, fmt.Errorf("invalid OrGroupId in ParentOverrideCondition for step %s: %w", stepCp.ReadableId, err)
 					}
 
+					action, err := enums.FromProto[sqlcv1.V1MatchConditionAction](parentOverrideCondition.Base.Action)
+					if err != nil {
+						return nil, err
+					}
+
 					steps[j].TriggerConditions = append(steps[j].TriggerConditions, v1.CreateStepMatchConditionOpt{
 						MatchConditionKind: "PARENT_OVERRIDE",
 						ReadableDataKey:    parentReadableId,
-						Action:             parentOverrideCondition.Base.Action.String(),
+						Action:             string(action),
 						Expression:         parentOverrideCondition.Base.Expression,
 						OrGroupId:          orGroupId,
 						ParentReadableId:   &parentReadableId,
@@ -1423,11 +1375,9 @@ func getCreateTaskOpts(tasks []*contracts.CreateTaskOpts, kind string) ([]v1.Cre
 					return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("a name is required for tenant-scoped concurrency (step %s)", stepCp.ReadableId))
 				}
 
-				var limitStrategy *string
-
-				if concurrency.LimitStrategy != nil && concurrency.LimitStrategy.String() != "" {
-					s := concurrency.LimitStrategy.String()
-					limitStrategy = &s
+				limitStrategy, err := enums.FromProtoPtr[enums.V1ConcurrencyStrategy](concurrency.LimitStrategy)
+				if err != nil {
+					return nil, err
 				}
 
 				var name string
@@ -1439,7 +1389,7 @@ func getCreateTaskOpts(tasks []*contracts.CreateTaskOpts, kind string) ([]v1.Cre
 				steps[j].Concurrency = append(steps[j].Concurrency, v1.CreateConcurrencyOpts{
 					Expression:        concurrency.Expression,
 					MaxRuns:           concurrency.MaxRuns,
-					LimitStrategy:     limitStrategy,
+					LimitStrategy:     (*string)(limitStrategy),
 					Name:              name,
 					IsTenantScoped:    tenantScoped,
 					MaxRunsExpression: concurrency.MaxRunsExpression,
@@ -1545,18 +1495,13 @@ func putWorkflowFeatureFlags(req *contracts.CreateWorkflowVersionRequest) map[st
 func protoMapToDesiredWorkerLabels(m map[string]*contracts.DesiredWorkerLabels) []*sqlcv1.GetDesiredLabelsRow {
 	labels := make([]*sqlcv1.GetDesiredLabelsRow, 0, len(m))
 	for key, label := range m {
-		var comparator *string
-		if label.Comparator != nil {
-			c := label.Comparator.String()
-			comparator = &c
-		}
 		labels = append(labels, v1.ProtoToDesiredWorkerLabel(
 			key,
 			label.StrValue,
 			label.IntValue,
 			label.Required,
 			label.Weight,
-			comparator,
+			label.Comparator,
 		))
 	}
 	return labels

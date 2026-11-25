@@ -20,6 +20,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/credentials"
+
+	"github.com/hatchet-dev/hatchet/internal/enumerables"
 )
 
 type TracerOpts struct {
@@ -61,16 +63,7 @@ func InitTracer(opts *TracerOpts) (func() error, error) {
 		return nil, fmt.Errorf("failed to create exporter: %w", err)
 	}
 
-	resourceAttrs := []attribute.KeyValue{
-		attribute.String("service.name", opts.ServiceName),
-		attribute.String("library.language", "go"),
-	}
-	resourceAttrs = append(resourceAttrs, k8sResourceAttributes()...)
-
-	resources, err := resource.New(
-		context.Background(),
-		resource.WithAttributes(resourceAttrs...),
-	)
+	resources, err := newResource(opts.ServiceName)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to set resources: %w", err)
@@ -137,16 +130,7 @@ func InitMeter(opts *TracerOpts) (func(context.Context) error, error) {
 		return nil, fmt.Errorf("failed to create exporter: %w", err)
 	}
 
-	resourceAttrs := []attribute.KeyValue{
-		attribute.String("service.name", opts.ServiceName),
-		attribute.String("library.language", "go"),
-	}
-	resourceAttrs = append(resourceAttrs, k8sResourceAttributes()...)
-
-	resources, err := resource.New(
-		context.Background(),
-		resource.WithAttributes(resourceAttrs...),
-	)
+	resources, err := newResource(opts.ServiceName)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to set resources: %w", err)
@@ -271,6 +255,26 @@ func prefixSpanKey(name string) string {
 	return fmt.Sprintf("hatchet.run/%s", name)
 }
 
+// newResource builds the OpenTelemetry resource shared by traces and metrics.
+// Its attributes are attached to every span and metric this process emits.
+func newResource(serviceName string) (*resource.Resource, error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("service.name", serviceName),
+		attribute.String("library.language", "go"),
+	}
+	attrs = append(attrs, k8sResourceAttributes()...)
+
+	return resource.New(
+		context.Background(),
+		// Read OTEL_SERVICE_NAME and comma-separated key=value pairs from
+		// OTEL_RESOURCE_ATTRIBUTES, such as deployment.environment=staging.
+		resource.WithFromEnv(),
+		// Options merge in order, and later ones win on conflicts. Keep this
+		// after WithFromEnv so attrs override the same environment keys.
+		resource.WithAttributes(attrs...),
+	)
+}
+
 func k8sResourceAttributes() []attribute.KeyValue {
 	var attrs []attribute.KeyValue
 
@@ -302,19 +306,5 @@ func firstNonEmpty(vals ...string) string {
 // CollectUniqueTenantIDs extracts unique tenant IDs from a slice of items.
 // The extractFn should return the tenant ID string for each item.
 func CollectUniqueTenantIDs[T any](items []T, extractFn func(T) string) []string {
-	if len(items) == 0 {
-		return nil
-	}
-
-	tenantIds := make(map[string]bool)
-	for _, item := range items {
-		tenantIds[extractFn(item)] = true
-	}
-
-	uniqueTenantIds := make([]string, 0, len(tenantIds))
-	for tid := range tenantIds {
-		uniqueTenantIds = append(uniqueTenantIds, tid)
-	}
-
-	return uniqueTenantIds
+	return enumerables.Uniq(enumerables.Map(items, extractFn))
 }

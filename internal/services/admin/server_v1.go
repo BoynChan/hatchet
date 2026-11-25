@@ -12,12 +12,14 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/hatchet-dev/hatchet/internal/datautils"
+	"github.com/hatchet-dev/hatchet/internal/enumerables"
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
 	"github.com/hatchet-dev/hatchet/internal/services/admin/contracts"
 	"github.com/hatchet-dev/hatchet/internal/services/controllers/task/trigger"
 	v1contracts "github.com/hatchet-dev/hatchet/internal/services/shared/proto/v1"
 	tasktypes "github.com/hatchet-dev/hatchet/internal/services/shared/tasktypes/v1"
 	"github.com/hatchet-dev/hatchet/pkg/constants"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	grpcmiddleware "github.com/hatchet-dev/hatchet/pkg/grpc/middleware"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
@@ -32,7 +34,7 @@ func (a *AdminServiceImpl) triggerWorkflowV1(ctx context.Context, req *v1contrac
 
 	canCreateTR, trLimit, err := a.repov1.TenantLimit().CanCreate(
 		ctx,
-		sqlcv1.LimitResourceTASKRUN,
+		enums.LimitResourceTASKRUN,
 		tenantId,
 		// NOTE: this isn't actually the number of tasks per workflow run, but we're just checking to see
 		// if we've exceeded the limit
@@ -95,7 +97,7 @@ func (a *AdminServiceImpl) triggerWorkflowV1(ctx context.Context, req *v1contrac
 			)
 
 			if detailErr != nil {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to build idempotency collision error: %v", detailErr))
+				return nil, fmt.Errorf("failed to build idempotency collision error: %w", detailErr)
 			}
 
 			collisionErr := connect.NewError(connect.CodeAlreadyExists, errors.New("idempotency key collision"))
@@ -110,16 +112,7 @@ func (a *AdminServiceImpl) triggerWorkflowV1(ctx context.Context, req *v1contrac
 		additionalMeta = *req.AdditionalMetadata
 	}
 
-	corrId := datautils.ExtractCorrelationId(additionalMeta)
-
-	if corrId != nil {
-		ctx = context.WithValue(ctx, constants.CorrelationIdKey, *corrId)
-	}
-
-	ctx = context.WithValue(ctx, constants.ResourceIdKey, opt.ExternalId.String())
-	ctx = context.WithValue(ctx, constants.ResourceTypeKey, constants.ResourceTypeWorkflowRun)
-
-	grpcmiddleware.TriggerCallback(ctx)
+	grpcmiddleware.TriggerResourceCallback(ctx, constants.ResourceTypeWorkflowRun, opt.ExternalId.String(), datautils.ExtractCorrelationId(additionalMeta))
 
 	return &contracts.TriggerWorkflowResponse{
 		WorkflowRunId: opt.ExternalId.String(),
@@ -183,27 +176,20 @@ func (a *AdminServiceImpl) bulkTriggerWorkflowV1(ctx context.Context, req *contr
 		if req.Workflows[i].AdditionalMetadata != nil {
 			additionalMeta = *req.Workflows[i].AdditionalMetadata
 		}
-		corrId := datautils.ExtractCorrelationId(additionalMeta)
 
-		ctx = context.WithValue(ctx, constants.CorrelationIdKey, corrId)
-		ctx = context.WithValue(ctx, constants.ResourceIdKey, runId.String())
-		ctx = context.WithValue(ctx, constants.ResourceTypeKey, constants.ResourceTypeWorkflowRun)
-
-		grpcmiddleware.TriggerCallback(ctx)
+		grpcmiddleware.TriggerResourceCallback(ctx, constants.ResourceTypeWorkflowRun, runId.String(), datautils.ExtractCorrelationId(additionalMeta))
 	}
 
 	if len(idempotencyKeyCollisions) > 0 {
-		collisionSet := make(map[uuid.UUID]struct{}, len(idempotencyKeyCollisions))
-
-		for _, collision := range idempotencyKeyCollisions {
-			collisionSet[collision.RequestedExternalId] = struct{}{}
-		}
+		collisionSet := enumerables.ToSet(idempotencyKeyCollisions, func(collision v1.IdempotencyCollision) uuid.UUID {
+			return collision.RequestedExternalId
+		})
 
 		successfullyTriggeredRunIds := make([]string, 0, len(runIds))
 		collisions := make([]*v1contracts.IdempotencyCollisionError, 0, len(idempotencyKeyCollisions))
 
 		for _, runId := range runIds {
-			_, isCollision := collisionSet[runId]
+			isCollision := enumerables.HasKey(collisionSet, runId)
 
 			if !isCollision {
 				successfullyTriggeredRunIds = append(successfullyTriggeredRunIds, runId.String())
@@ -225,7 +211,7 @@ func (a *AdminServiceImpl) bulkTriggerWorkflowV1(ctx context.Context, req *contr
 		)
 
 		if detailErr != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to build idempotency collision error: %v", detailErr))
+			return nil, fmt.Errorf("failed to build idempotency collision error: %w", detailErr)
 		}
 
 		collisionErr := connect.NewError(connect.CodeAlreadyExists, errors.New("idempotency key collision"))

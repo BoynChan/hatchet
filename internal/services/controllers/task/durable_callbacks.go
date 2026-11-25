@@ -7,9 +7,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/hatchet-dev/hatchet/internal/enumerables"
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
 	"github.com/hatchet-dev/hatchet/internal/services/shared/durable"
 	tasktypes "github.com/hatchet-dev/hatchet/internal/services/shared/tasktypes/v1"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
@@ -51,10 +53,9 @@ func (tc *TasksControllerImpl) handleDurableRestoreTask(ctx context.Context, ten
 		return fmt.Errorf("failed to batch-restore evicted tasks: %w", err)
 	}
 
-	restoredByTaskId := make(map[int64]*sqlcv1.RestoreEvictedTasksRow, len(restoredRows))
-	for _, r := range restoredRows {
-		restoredByTaskId[r.TaskID] = r
-	}
+	restoredByTaskId := enumerables.KeyBy(restoredRows, func(r *sqlcv1.RestoreEvictedTasksRow) int64 {
+		return r.TaskID
+	})
 
 	invCountOpts := make([]v1.IdInsertedAt, 0, len(flatTasks))
 	for _, t := range flatTasks {
@@ -89,7 +90,7 @@ func (tc *TasksControllerImpl) handleDurableRestoreTask(ctx context.Context, ten
 				RetryCount:             t.RetryCount,
 				DurableInvocationCount: durableInvCount,
 				EventTimestamp:         time.Now(),
-				EventType:              sqlcv1.V1EventTypeOlapDURABLERESTORING,
+				EventType:              enums.V1EventTypeOlapDURABLERESTORING,
 				EventMessage:           fmt.Sprintf("Restoring evicted task: %s", reason),
 			},
 		)

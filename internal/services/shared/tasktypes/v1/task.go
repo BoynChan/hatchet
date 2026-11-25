@@ -5,8 +5,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
+	"github.com/hatchet-dev/hatchet/pkg/enums"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
-	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 )
 
 func TriggerTaskMessage(tenantId uuid.UUID, payloads ...*v1.WorkflowNameTriggerOpts) (*msgqueue.Message, error) {
@@ -63,6 +63,10 @@ type CompletedTaskPayload struct {
 
 	// (optional) the output data
 	Output []byte
+
+	// (optional) the id the core and OLAP copies of this completion share: the task controller
+	// stores the completion event payload under it and the OLAP event row points at it
+	PayloadReferenceId *uuid.UUID
 }
 
 func CompletedTaskMessage(
@@ -74,6 +78,7 @@ func CompletedTaskMessage(
 	retryCount int32,
 	output []byte,
 	workerId string,
+	payloadReferenceId *uuid.UUID,
 ) (*msgqueue.Message, error) {
 	return msgqueue.NewTenantMessage(
 		tenantId,
@@ -81,13 +86,14 @@ func CompletedTaskMessage(
 		false,
 		true,
 		CompletedTaskPayload{
-			TaskId:        taskId,
-			InsertedAt:    taskInsertedAt,
-			ExternalId:    taskExternalId,
-			WorkflowRunId: workflowRunId,
-			RetryCount:    retryCount,
-			Output:        output,
-			WorkerId:      workerId,
+			TaskId:             taskId,
+			InsertedAt:         taskInsertedAt,
+			ExternalId:         taskExternalId,
+			WorkflowRunId:      workflowRunId,
+			RetryCount:         retryCount,
+			Output:             output,
+			WorkerId:           workerId,
+			PayloadReferenceId: payloadReferenceId,
 		},
 	)
 }
@@ -191,7 +197,7 @@ type CancelledTaskPayload struct {
 	EventMessage string
 
 	// (required) the reason for cancellation
-	EventType sqlcv1.V1EventTypeOlap
+	EventType enums.V1EventTypeOlap
 
 	// (optional) whether the task should notify the worker
 	ShouldNotify bool
@@ -204,7 +210,7 @@ func CancelledTaskMessage(
 	taskExternalId uuid.UUID,
 	workflowRunId uuid.UUID,
 	retryCount int32,
-	eventType sqlcv1.V1EventTypeOlap,
+	eventType enums.V1EventTypeOlap,
 	eventMessage string,
 	shouldNotify bool,
 ) (*msgqueue.Message, error) {
@@ -259,7 +265,7 @@ type NotifyFinalizedPayload struct {
 	ExternalId uuid.UUID `validate:"required"`
 
 	// (required) the status of the task
-	Status sqlcv1.V1ReadableStatusOlap
+	Status enums.V1ReadableStatusOlap
 }
 
 type CandidateFinalizedPayload struct {
@@ -336,6 +342,26 @@ func NewTogglePauseWorkflowMessage(tenantId, workflowId uuid.UUID, isPaused bool
 		TogglePauseWorkflowPayload{
 			WorkflowID: workflowId,
 			IsPaused:   isPaused,
+		},
+	)
+}
+
+// RateLimitPausesChangedPayload tells the task controller to hold or release the tenant's queued runs behind rate limit pauses.
+type RateLimitPausesChangedPayload struct {
+	// Paused is true when a key was paused, and false when a pause ended
+	Paused bool
+}
+
+// NewRateLimitPausesChangedMessage is sent to the task controller when a rate limit key is paused, so it holds the runs
+// already waiting on the key, and when a pause ends, so it releases them.
+func NewRateLimitPausesChangedMessage(tenantId uuid.UUID, paused bool) (*msgqueue.Message, error) {
+	return msgqueue.NewTenantMessage(
+		tenantId,
+		msgqueue.MsgIDRateLimitPausesChanged,
+		false,
+		true,
+		RateLimitPausesChangedPayload{
+			Paused: paused,
 		},
 	)
 }

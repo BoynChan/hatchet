@@ -9,12 +9,15 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/rs/zerolog"
 
 	"github.com/hatchet-dev/hatchet/pkg/errors"
+	"github.com/hatchet-dev/hatchet/pkg/repository/fairpool"
 )
 
 // expectedStatus maps known, non-internal errors to their canonical codes.
@@ -40,9 +43,21 @@ func expectedStatus(ctx context.Context, err error) error {
 		return connect.NewError(connect.CodeNotFound, goerrors.New("not found"))
 	}
 
-	// Extensions built against google.golang.org/grpc return status errors; keep
-	// their code, message and details on the wire. The message of a wrapped status error is the
-	// text of the whole chain, as status.FromError reports it.
+	// The connection cap is throttling, so it maps to ResourceExhausted. The RetryInfo detail
+	// marks it as transient, which tells it apart from a tenant quota of the same code.
+	var limitErr *fairpool.LimitError
+	if goerrors.As(err, &limitErr) {
+		throttled := connect.NewError(connect.CodeResourceExhausted, goerrors.New("resource exhausted: too many concurrent database operations for this tenant, retry shortly"))
+
+		if detail, detailErr := connect.NewErrorDetail(&errdetails.RetryInfo{RetryDelay: durationpb.New(fairpool.RetryAfter)}); detailErr == nil {
+			throttled.AddDetail(detail)
+		}
+
+		return throttled
+	}
+
+	// Extensions can return gRPC status errors. Convert their code and details here;
+	// redactServerError removes diagnostics from server failures before they reach the wire.
 	if st, ok := status.FromError(err); ok && st.Code() != codes.Unknown && st.Code() != codes.OK {
 		statusErr := connect.NewError(connect.Code(st.Code()), goerrors.New(st.Message()))
 
@@ -71,14 +86,14 @@ func NewErrorInterceptor(a errors.Alerter,
 	}
 }
 
-// Interceptor converts errors without a code into internal errors, for unary and streaming calls.
+// Interceptor logs unexpected failures and hides server diagnostics on unary and streaming calls.
 func (e *ErrorInterceptor) Interceptor() connect.Interceptor {
 	return &handlerInterceptor{
 		after: func(ctx context.Context, _ connect.Spec, err error) error {
 			// if this is not a coded error already, convert it to an internal error
 			if err != nil && connect.CodeOf(err) == connect.CodeUnknown {
 				if statusErr := expectedStatus(ctx, err); statusErr != nil {
-					return statusErr
+					return e.redactServerError(ctx, err, statusErr)
 				}
 
 				e.l.Err(err).Ctx(ctx).Msg("")
@@ -87,9 +102,44 @@ func (e *ErrorInterceptor) Interceptor() connect.Interceptor {
 				return connect.NewError(connect.CodeInternal, goerrors.New("An internal error occurred."))
 			}
 
-			return unwrappedCodedError(err)
+			return e.redactServerError(ctx, err, unwrappedCodedError(err))
 		},
 	}
+}
+
+// Server and transport errors may contain backend addresses or debug details even when
+// they have an explicit status code. Only client-actionable errors retain their details.
+func (e *ErrorInterceptor) redactServerError(ctx context.Context, cause, response error) error {
+	if response == nil {
+		return nil
+	}
+
+	code := connect.CodeOf(response)
+	level := zerolog.WarnLevel
+	var message string
+	//exhaustive:ignore
+	switch code {
+	case connect.CodeInternal:
+		message = "An internal error occurred."
+		level = zerolog.ErrorLevel
+	case connect.CodeDataLoss:
+		message = "An internal data error occurred."
+		level = zerolog.ErrorLevel
+	case connect.CodeUnavailable:
+		message = "service temporarily unavailable"
+	case connect.CodeAborted:
+		message = "request was aborted"
+	case connect.CodeDeadlineExceeded:
+		message = "request deadline exceeded"
+	case connect.CodeCanceled:
+		message = "request was canceled"
+		level = zerolog.DebugLevel
+	default:
+		return response
+	}
+
+	e.l.WithLevel(level).Ctx(ctx).Err(cause).Msg("RPC request failed")
+	return connect.NewError(code, goerrors.New(message))
 }
 
 // unwrappedCodedError keeps the message of a coded error that a handler wrapped, as in
@@ -145,7 +195,7 @@ func RecoveryInterceptor(a errors.Alerter, l *zerolog.Logger) connect.Intercepto
 		l.Err(err).Msg("")
 		a.SendAlert(context.Background(), err, nil)
 
-		return connect.NewError(connect.CodeInternal, goerrors.New("An internal error occurred"))
+		return connect.NewError(connect.CodeInternal, goerrors.New("An internal error occurred."))
 	}
 
 	return &recoveryInterceptor{handlePanic: handlePanic}

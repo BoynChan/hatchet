@@ -12,7 +12,7 @@ import (
 
 func TestCompletedTaskMessageRetainsReportingWorker(t *testing.T) {
 	worker := uuid.New().String()
-	msg, err := CompletedTaskMessage(uuid.New(), 1, pgtype.Timestamptz{}, uuid.New(), uuid.New(), 0, []byte(`{}`), worker)
+	msg, err := CompletedTaskMessage(uuid.New(), 1, pgtype.Timestamptz{}, uuid.New(), uuid.New(), 0, []byte(`{}`), worker, nil)
 	require.NoError(t, err)
 	payloads := msgqueue.JSONConvert[CompletedTaskPayload](msg.Payloads)
 	require.Len(t, payloads, 1)

@@ -54,6 +54,25 @@ func (q *Queries) CountStreamTopics(ctx context.Context, db DBTX, tenantid uuid.
 	return count, err
 }
 
+const countStreamTopicsMatching = `-- name: CountStreamTopicsMatching :one
+SELECT COUNT(*)
+FROM v1_stream_topic t
+WHERE t.tenant_id = $1::uuid
+    AND ($2::text IS NULL OR t.topic ILIKE '%' || $2::text || '%' OR t.namespace ILIKE '%' || $2::text || '%')
+`
+
+type CountStreamTopicsMatchingParams struct {
+	Tenantid uuid.UUID   `json:"tenantid"`
+	Search   pgtype.Text `json:"search"`
+}
+
+func (q *Queries) CountStreamTopicsMatching(ctx context.Context, db DBTX, arg CountStreamTopicsMatchingParams) (int64, error) {
+	row := db.QueryRow(ctx, countStreamTopicsMatching, arg.Tenantid, arg.Search)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createStreamMessagePartitions = `-- name: CreateStreamMessagePartitions :exec
 SELECT create_v1_hourly_range_partition('v1_stream_message', hours.hour_start)
 FROM generate_series($1::timestamptz, $2::timestamptz, INTERVAL '1 hour') AS hours(hour_start)
@@ -220,6 +239,54 @@ func (q *Queries) GetStreamPayload(ctx context.Context, db DBTX, arg GetStreamPa
 	var payload []byte
 	err := row.Scan(&payload)
 	return payload, err
+}
+
+const getStreamPayloadSize = `-- name: GetStreamPayloadSize :one
+SELECT octet_length(payload)::bigint AS size
+FROM v1_stream_payload
+WHERE tenant_id = $1::uuid AND id = $2::uuid AND inserted_at = $3::timestamptz
+`
+
+type GetStreamPayloadSizeParams struct {
+	Tenantid   uuid.UUID          `json:"tenantid"`
+	ID         uuid.UUID          `json:"id"`
+	Insertedat pgtype.Timestamptz `json:"insertedat"`
+}
+
+// octet_length reads a TOASTed payload's size without loading it.
+func (q *Queries) GetStreamPayloadSize(ctx context.Context, db DBTX, arg GetStreamPayloadSizeParams) (int64, error) {
+	row := db.QueryRow(ctx, getStreamPayloadSize, arg.Tenantid, arg.ID, arg.Insertedat)
+	var size int64
+	err := row.Scan(&size)
+	return size, err
+}
+
+const getStreamTopicInfo = `-- name: GetStreamTopicInfo :one
+SELECT
+    COALESCE(t.starting_offset, 0)::bigint AS starting_offset,
+    COALESCE(t.last_offset, 0)::bigint AS last_offset
+FROM (SELECT 1) AS one
+LEFT JOIN v1_stream_topic t
+    ON t.tenant_id = $1::uuid AND t.namespace = $2::text AND t.topic = $3::text
+`
+
+type GetStreamTopicInfoParams struct {
+	Tenantid  uuid.UUID `json:"tenantid"`
+	Namespace string    `json:"namespace"`
+	Topic     string    `json:"topic"`
+}
+
+type GetStreamTopicInfoRow struct {
+	StartingOffset int64 `json:"starting_offset"`
+	LastOffset     int64 `json:"last_offset"`
+}
+
+// Zeros for a topic not yet published to. A primary-key lookup, cheap enough to run every poll tick.
+func (q *Queries) GetStreamTopicInfo(ctx context.Context, db DBTX, arg GetStreamTopicInfoParams) (*GetStreamTopicInfoRow, error) {
+	row := db.QueryRow(ctx, getStreamTopicInfo, arg.Tenantid, arg.Namespace, arg.Topic)
+	var i GetStreamTopicInfoRow
+	err := row.Scan(&i.StartingOffset, &i.LastOffset)
+	return &i, err
 }
 
 const getStreamTopicMetadata = `-- name: GetStreamTopicMetadata :one
@@ -522,6 +589,106 @@ func (q *Queries) ListStreamRetentionDeleteCandidates(ctx context.Context, db DB
 	return items, nil
 }
 
+const listStreamTopics = `-- name: ListStreamTopics :many
+SELECT
+    t.namespace,
+    t.topic,
+    t.inserted_at,
+    t.last_published_at,
+    t.starting_offset,
+    (
+        SELECT COUNT(*)
+        FROM v1_stream_message m
+        WHERE m.tenant_id = t.tenant_id
+            AND m.namespace = t.namespace
+            AND m.topic = t.topic
+            AND m.inserted_at >= $1::timestamptz
+    )::bigint AS message_count
+FROM v1_stream_topic t
+WHERE t.tenant_id = $2::uuid
+    AND ($3::text IS NULL OR t.topic ILIKE '%' || $3::text || '%' OR t.namespace ILIKE '%' || $3::text || '%')
+ORDER BY t.last_published_at DESC, t.namespace, t.topic
+LIMIT $5::integer
+OFFSET $4::integer
+`
+
+type ListStreamTopicsParams struct {
+	Retainedsince pgtype.Timestamptz `json:"retainedsince"`
+	Tenantid      uuid.UUID          `json:"tenantid"`
+	Search        pgtype.Text        `json:"search"`
+	Topicoffset   int32              `json:"topicoffset"`
+	Topiclimit    int32              `json:"topiclimit"`
+}
+
+type ListStreamTopicsRow struct {
+	Namespace       string             `json:"namespace"`
+	Topic           string             `json:"topic"`
+	InsertedAt      pgtype.Timestamptz `json:"inserted_at"`
+	LastPublishedAt pgtype.Timestamptz `json:"last_published_at"`
+	StartingOffset  int64              `json:"starting_offset"`
+	MessageCount    int64              `json:"message_count"`
+}
+
+// message_count covers only messages within the tenant's retention.
+func (q *Queries) ListStreamTopics(ctx context.Context, db DBTX, arg ListStreamTopicsParams) ([]*ListStreamTopicsRow, error) {
+	rows, err := db.Query(ctx, listStreamTopics,
+		arg.Retainedsince,
+		arg.Tenantid,
+		arg.Search,
+		arg.Topicoffset,
+		arg.Topiclimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*ListStreamTopicsRow
+	for rows.Next() {
+		var i ListStreamTopicsRow
+		if err := rows.Scan(
+			&i.Namespace,
+			&i.Topic,
+			&i.InsertedAt,
+			&i.LastPublishedAt,
+			&i.StartingOffset,
+			&i.MessageCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resetStreamTopic = `-- name: ResetStreamTopic :exec
+UPDATE v1_stream_topic
+SET starting_offset = LEAST($1::bigint, last_offset)
+WHERE tenant_id = $2::uuid AND namespace = $3::text AND topic = $4::text
+`
+
+type ResetStreamTopicParams struct {
+	StartingOffset pgtype.Int8 `json:"startingOffset"`
+	Tenantid       uuid.UUID   `json:"tenantid"`
+	Namespace      string      `json:"namespace"`
+	Topic          string      `json:"topic"`
+}
+
+// Waits on the row lock a publish holds until commit (see
+// ReserveStreamTopicOffsets), so every offset up to last_offset is stored.
+// LEAST ignores a NULL startingOffset, and caps one past offsets yet reserved.
+func (q *Queries) ResetStreamTopic(ctx context.Context, db DBTX, arg ResetStreamTopicParams) error {
+	_, err := db.Exec(ctx, resetStreamTopic,
+		arg.StartingOffset,
+		arg.Tenantid,
+		arg.Namespace,
+		arg.Topic,
+	)
+	return err
+}
+
 const setStreamMessagePayloadRef = `-- name: SetStreamMessagePayloadRef :exec
 UPDATE v1_stream_message
 SET payload_id = $1::uuid, payload_inserted_at = $2::timestamptz
@@ -556,32 +723,12 @@ func (q *Queries) SetStreamMessagePayloadRef(ctx context.Context, db DBTX, arg S
 	return err
 }
 
-const streamPayloadExists = `-- name: StreamPayloadExists :one
-SELECT EXISTS (
-    SELECT 1 FROM v1_stream_payload
-    WHERE tenant_id = $1::uuid AND id = $2::uuid AND inserted_at = $3::timestamptz
-) AS exists
-`
-
-type StreamPayloadExistsParams struct {
-	Tenantid   uuid.UUID          `json:"tenantid"`
-	ID         uuid.UUID          `json:"id"`
-	Insertedat pgtype.Timestamptz `json:"insertedat"`
-}
-
-func (q *Queries) StreamPayloadExists(ctx context.Context, db DBTX, arg StreamPayloadExistsParams) (bool, error) {
-	row := db.QueryRow(ctx, streamPayloadExists, arg.Tenantid, arg.ID, arg.Insertedat)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
 const upsertStreamTopic = `-- name: UpsertStreamTopic :one
 INSERT INTO v1_stream_topic (tenant_id, namespace, topic)
 VALUES ($1::uuid, $2::text, $3::text)
 ON CONFLICT (tenant_id, namespace, topic) DO UPDATE
 SET last_published_at = NOW()
-RETURNING v1_stream_topic.tenant_id, v1_stream_topic.namespace, v1_stream_topic.topic, v1_stream_topic.inserted_at, v1_stream_topic.last_published_at, v1_stream_topic.last_offset, (xmax = 0) AS inserted
+RETURNING v1_stream_topic.tenant_id, v1_stream_topic.namespace, v1_stream_topic.topic, v1_stream_topic.inserted_at, v1_stream_topic.last_published_at, v1_stream_topic.last_offset, v1_stream_topic.starting_offset, (xmax = 0) AS inserted
 `
 
 type UpsertStreamTopicParams struct {
@@ -606,6 +753,7 @@ func (q *Queries) UpsertStreamTopic(ctx context.Context, db DBTX, arg UpsertStre
 		&i.V1StreamTopic.InsertedAt,
 		&i.V1StreamTopic.LastPublishedAt,
 		&i.V1StreamTopic.LastOffset,
+		&i.V1StreamTopic.StartingOffset,
 		&i.Inserted,
 	)
 	return &i, err

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/hatchet-dev/hatchet/internal/enumerables"
 	"github.com/hatchet-dev/hatchet/internal/queueutils"
 	"github.com/hatchet-dev/hatchet/pkg/randomticker"
 	v1 "github.com/hatchet-dev/hatchet/pkg/repository"
@@ -421,6 +422,27 @@ func (s *Scheduler) addQueue(queueName string) {
 	}
 	s.mustDo(func() {
 		s.queues[queueName] = struct{}{}
+	})
+}
+
+// removeWorker drops a worker and its slot pools from the in-memory view so no
+// further assignments land on it before the next worker lease refresh. The
+// worker's unacked assignments are left alone: their acks and nacks still
+// resolve through unackedSlots. Action worker lists are rebuilt on the next
+// replenish; until then, a lookup of the removed worker finds no pools and is
+// skipped by assignment.
+func (s *Scheduler) removeWorker(workerId uuid.UUID) {
+	s.mustDo(func() {
+		delete(s.workers, workerId)
+
+		for slotType := range s.poolsByWorker[workerId] {
+			delete(s.pools, poolKey{workerId: workerId, slotType: slotType})
+		}
+
+		delete(s.poolsByWorker, workerId)
+		delete(s.warmedSlotTypes, workerId)
+
+		s.markWorkerCapacityUpdated()
 	})
 }
 
@@ -960,10 +982,15 @@ type scheduleRateLimitResult struct {
 
 // shouldRemoveFromQueue returns true if the queue item is being rate limited and should be removed from the queue
 // until the rate limit is reset.
-// we only do this if the requeue_after time is at least 2 seconds in the future, to avoid thrashing
+// unless the item is paused, we only do this if the requeue_after time is at least 2 seconds in the future, to avoid thrashing
 func (s *scheduleRateLimitResult) shouldRemoveFromQueue() bool {
 	if s.rateLimitResult == nil {
 		return false
+	}
+
+	// a paused item is held in the database until the pause ends, so its concurrency slot is freed for other keys
+	if s.pausedUntil != nil {
+		return true
 	}
 
 	nextRefillAt := s.nextRefillAt
@@ -979,6 +1006,8 @@ type assignSingleResult struct {
 
 	noSlots   bool
 	succeeded bool
+
+	markedStarved bool
 
 	rateLimitResult *scheduleRateLimitResult
 
@@ -1155,6 +1184,7 @@ func (s *Scheduler) tryAssignBatch(
 				for i := range res {
 					if res[i].rateLimitResult == nil && !res[i].toBatch && !res[i].succeeded {
 						res[i].noSlots = false
+						res[i].markedStarved = false
 					}
 				}
 
@@ -1306,6 +1336,7 @@ func (s *Scheduler) handleAssignBatch(
 				}
 
 				s.lookupActionAndMarkStarved(actionId, qis[i].Queue, requests)
+				res[i].markedStarved = true
 			}
 		}
 
@@ -1447,6 +1478,7 @@ func (s *Scheduler) assignSingleton(
 		if (len(candidates) == len(a.workerIds) && isSingleUnitRequest(requests)) ||
 			!hasFreeSlotOfEachType(s.poolsByWorker, a.workerIds, requests, now) {
 			s.markActionStarved(a, qi.Queue, requests)
+			r.markedStarved = true
 		}
 
 		r.noSlots = true
@@ -1594,6 +1626,8 @@ func (s *Scheduler) rankWorkerIds(
 			if qi.DesiredWorkerID != nil && workerId == *qi.DesiredWorkerID {
 				rank = 1
 			}
+		case sqlcv1.V1StickyStrategyNONE:
+			fallthrough
 		default:
 			if len(labels) > 0 {
 				// Label affinity reads worker metadata from s.workers. Do not
@@ -1655,6 +1689,13 @@ type assignResults struct {
 	schedulingTimedOut []*sqlcv1.V1QueueItem
 	rateLimited        []*scheduleRateLimitResult
 	rateLimitedToMove  []*scheduleRateLimitResult
+
+	unassignedMarkedStarvedCount int
+}
+
+func (r *assignResults) canWaitForRestoredCapacity() bool {
+	return len(r.unassigned) == r.unassignedMarkedStarvedCount &&
+		len(r.assigned)+len(r.buffered)+len(r.batched)+len(r.schedulingTimedOut)+len(r.rateLimited)+len(r.rateLimitedToMove) == 0
 }
 
 func (s *Scheduler) tryAssign(
@@ -1740,6 +1781,7 @@ func (s *Scheduler) tryAssign(
 					batchRateLimited := make([]*scheduleRateLimitResult, 0, len(batchQis))
 					batchRateLimitedToMove := make([]*scheduleRateLimitResult, 0, len(batchQis))
 					batchUnassigned := make([]*sqlcv1.V1QueueItem, 0, len(batchQis))
+					batchUnassignedMarkedStarvedCount := 0
 
 					batchStart := time.Now()
 
@@ -1770,6 +1812,10 @@ func (s *Scheduler) tryAssign(
 							} else {
 								batchUnassigned = append(batchUnassigned, singleRes.qi)
 
+								if singleRes.markedStarved {
+									batchUnassignedMarkedStarvedCount++
+								}
+
 								if !singleRes.noSlots {
 									s.l.Error().Ctx(ctx).Msgf("scheduling failed for queue item %d: expected assignment to fail with either no slots or rate limit exceeded, but failed with neither", singleRes.qi.ID)
 								}
@@ -1796,6 +1842,8 @@ func (s *Scheduler) tryAssign(
 						rateLimited:       batchRateLimited,
 						rateLimitedToMove: batchRateLimitedToMove,
 						unassigned:        batchUnassigned,
+
+						unassignedMarkedStarvedCount: batchUnassignedMarkedStarvedCount,
 					}
 
 					extensionResultsMu.Lock()
@@ -1828,11 +1876,7 @@ func (s *Scheduler) tryAssign(
 }
 
 func (s *Scheduler) getExtensionInput(results []*assignResults) *PostAssignInput {
-	unassigned := make([]*sqlcv1.V1QueueItem, 0)
-
-	for _, res := range results {
-		unassigned = append(unassigned, res.unassigned...)
-	}
+	unassigned := enumerables.FlatMap(results, func(res *assignResults) []*sqlcv1.V1QueueItem { return res.unassigned })
 
 	return &PostAssignInput{
 		HasUnassignedStepRuns: len(unassigned) > 0,

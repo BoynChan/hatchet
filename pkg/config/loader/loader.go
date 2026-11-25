@@ -3,6 +3,7 @@
 package loader
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -17,7 +18,6 @@ import (
 	"github.com/hatchet-dev/pgoutbox"
 	pgxzero "github.com/jackc/pgx-zerolog"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/tracelog"
 	"github.com/rs/zerolog"
@@ -47,9 +47,11 @@ import (
 	"github.com/hatchet-dev/hatchet/pkg/logger"
 	"github.com/hatchet-dev/hatchet/pkg/repository/cache"
 	"github.com/hatchet-dev/hatchet/pkg/repository/debugger"
+	"github.com/hatchet-dev/hatchet/pkg/repository/fairpool"
 	"github.com/hatchet-dev/hatchet/pkg/repository/sqlcv1"
 	v1 "github.com/hatchet-dev/hatchet/pkg/scheduling/v1"
 	"github.com/hatchet-dev/hatchet/pkg/security"
+	"github.com/hatchet-dev/hatchet/pkg/serverlessoperator"
 	"github.com/hatchet-dev/hatchet/pkg/validator"
 
 	"github.com/hatchet-dev/hatchet/internal/msgqueue"
@@ -156,6 +158,18 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		return nil, err
 	}
 
+	if cf.FairpoolTenantMaxPercent < 1 || cf.FairpoolTenantMaxPercent > 100 {
+		return nil, fmt.Errorf("DATABASE_FAIRPOOL_TENANT_MAX_PERCENT must be from 1 to 100, got %d", cf.FairpoolTenantMaxPercent)
+	}
+
+	if cf.FairpoolSharedMaxPercent < 1 || cf.FairpoolSharedMaxPercent > 100 {
+		return nil, fmt.Errorf("DATABASE_FAIRPOOL_SHARED_MAX_PERCENT must be from 1 to 100, got %d", cf.FairpoolSharedMaxPercent)
+	}
+
+	if cf.AcquireTimeout < 0 {
+		return nil, fmt.Errorf("DATABASE_ACQUIRE_TIMEOUT must be 0 or positive, got %s", cf.AcquireTimeout)
+	}
+
 	serverSharedFilePath := filepath.Join(c.directory, "server.yaml")
 	serverConfigFileBytes, err := loaderutils.GetConfigBytes(serverSharedFilePath)
 
@@ -189,66 +203,6 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		_ = os.Setenv("DATABASE_URL", databaseUrl)
 	}
 
-	pgxpoolConnAfterConnect := func(ctx context.Context, conn *pgx.Conn) error {
-		// Set timezone to UTC for all connections
-		if _, err := conn.Exec(ctx, "SET TIME ZONE 'UTC'"); err != nil {
-			return err
-		}
-
-		// ref: https://github.com/jackc/pgx/issues/1549
-		t, err := conn.LoadType(ctx, "v1_readable_status_olap")
-		if err != nil {
-			return err
-		}
-
-		conn.TypeMap().RegisterType(t)
-
-		t, err = conn.LoadType(ctx, "_v1_readable_status_olap")
-		if err != nil {
-			return err
-		}
-
-		conn.TypeMap().RegisterType(t)
-
-		t, err = conn.LoadType(ctx, "v1_log_line_level")
-		if err != nil {
-			return err
-		}
-
-		conn.TypeMap().RegisterType(t)
-
-		t, err = conn.LoadType(ctx, "_v1_log_line_level")
-		if err != nil {
-			return err
-		}
-
-		conn.TypeMap().RegisterType(t)
-
-		if uuidType, ok := conn.TypeMap().TypeForName("uuid"); ok {
-			var uuidrangeOID uint32
-			err = conn.QueryRow(ctx, "SELECT oid FROM pg_type WHERE typname = 'uuidrange'").Scan(&uuidrangeOID)
-			if err != nil && err != pgx.ErrNoRows {
-				return fmt.Errorf("loading uuidrange oid: %w", err)
-			}
-			if err == nil {
-				conn.TypeMap().RegisterType(&pgtype.Type{
-					Name:  "uuidrange",
-					OID:   uuidrangeOID,
-					Codec: &pgtype.RangeCodec{ElementType: uuidType},
-				})
-			}
-		}
-
-		_, err = conn.Exec(ctx, "SET statement_timeout=30000")
-		if err != nil {
-			return err
-		}
-
-		_, err = conn.Exec(ctx, "SET idle_in_transaction_session_timeout=30000")
-
-		return err
-	}
-
 	// Determine which URL the main pool should use:
 	// - If DATABASE_PGBOUNCER_URL is set, main pool connects through pgbouncer
 	// - Otherwise, main pool connects directly via DATABASE_URL
@@ -267,34 +221,25 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		appName = cf.ApplicationNamePrefix + ":" + appName
 	}
 
-	config, err := pgxpool.ParseConfig(mainPoolUrl)
+	config, err := NewPgxPoolConfig(mainPoolUrl, PgxPoolOpts{
+		ApplicationName: appName,
+		MaxConns:        int32(cf.MaxConns), // nolint: gosec
+		MinConns:        int32(cf.MinConns), // nolint: gosec
+		MaxConnLifetime: cf.MaxConnLifetime,
+		MaxConnIdleTime: cf.MaxConnIdleTime,
+		DialTimeout:     cf.DialTimeout,
+		ConnectTimeout:  cf.ConnectTimeout,
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	setPgxApplicationName(config, appName)
-
-	config.AfterConnect = pgxpoolConnAfterConnect
 
 	if cf.LogQueries {
 		config.ConnConfig.Tracer = &tracelog.TraceLog{
 			Logger:   pgxzero.NewLogger(l),
 			LogLevel: tracelog.LogLevelDebug,
 		}
-	} else {
-		config.ConnConfig.Tracer = newOTelPgxTracer()
 	}
-
-	if cf.MaxConns != 0 {
-		config.MaxConns = int32(cf.MaxConns) // nolint: gosec
-	}
-
-	if cf.MinConns != 0 {
-		config.MinConns = int32(cf.MinConns) // nolint: gosec
-	}
-
-	config.MaxConnLifetime = cf.MaxConnLifetime
-	config.MaxConnIdleTime = cf.MaxConnIdleTime
 
 	// Check database instance timezone if enforcement is enabled
 	if cf.EnforceUTCTimezone {
@@ -312,11 +257,20 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		config.AfterRelease = debug.AfterRelease
 	}
 
-	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	gatedPool, err := fairpool.NewWithConfig(context.Background(), config, fairpool.Options{
+		MaxPercent:       cf.FairpoolTenantMaxPercent,
+		SharedMaxPercent: cf.FairpoolSharedMaxPercent,
+		MaxWait:          cf.FairpoolTenantMaxWait,
+		AcquireTimeout:   cf.AcquireTimeout,
+		PoolName:         "main",
+		L:                &l,
+	})
 
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to database: %w", err)
 	}
+
+	pool := gatedPool.Unwrap()
 
 	if debug != nil {
 		// pool needs the debugger hooks (BeforeAcquire/AfterRelease) but debugger needs the pool
@@ -324,33 +278,31 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		debug.Setup(pool)
 	}
 
+	if cf.PgBouncerURL != "" {
+		warnIfPgBouncerTimeoutsDisabled(config.ConnConfig, &l)
+	}
+
 	// a pool for read replicas, if enabled
-	var readReplicaPool *pgxpool.Pool
+	var readReplicaPool *fairpool.Pool
 
 	if cf.ReadReplicaEnabled {
 		if cf.ReadReplicaDatabaseURL == "" {
 			return nil, fmt.Errorf("read replica database url is required if read replica is enabled")
 		}
 
-		readReplicaConfig, err := pgxpool.ParseConfig(cf.ReadReplicaDatabaseURL)
+		readReplicaConfig, err := NewPgxPoolConfig(cf.ReadReplicaDatabaseURL, PgxPoolOpts{
+			ApplicationName: appName + ":read-replica",
+			MaxConns:        int32(cf.ReadReplicaMaxConns), // nolint: gosec
+			MinConns:        int32(cf.ReadReplicaMinConns), // nolint: gosec
+			MaxConnLifetime: cf.MaxConnLifetime,
+			MaxConnIdleTime: cf.MaxConnIdleTime,
+			DialTimeout:     cf.DialTimeout,
+			ConnectTimeout:  cf.ConnectTimeout,
+		})
 
 		if err != nil {
 			return nil, fmt.Errorf("could not parse read replica database url: %w", err)
 		}
-
-		setPgxApplicationName(readReplicaConfig, appName+":read-replica")
-
-		if cf.ReadReplicaMaxConns != 0 {
-			readReplicaConfig.MaxConns = int32(cf.ReadReplicaMaxConns) // nolint: gosec
-		}
-
-		if cf.ReadReplicaMinConns != 0 {
-			readReplicaConfig.MinConns = int32(cf.ReadReplicaMinConns) // nolint: gosec
-		}
-
-		readReplicaConfig.MaxConnLifetime = cf.MaxConnLifetime
-		readReplicaConfig.MaxConnIdleTime = cf.MaxConnIdleTime
-		readReplicaConfig.ConnConfig.Tracer = newOTelPgxTracer()
 
 		// Check read replica database instance timezone if enforcement is enabled
 		if cf.EnforceUTCTimezone {
@@ -359,9 +311,14 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 			}
 		}
 
-		readReplicaConfig.AfterConnect = pgxpoolConnAfterConnect
-
-		readReplicaPool, err = pgxpool.NewWithConfig(context.Background(), readReplicaConfig)
+		readReplicaPool, err = fairpool.NewWithConfig(context.Background(), readReplicaConfig, fairpool.Options{
+			MaxPercent:       cf.FairpoolTenantMaxPercent,
+			SharedMaxPercent: cf.FairpoolSharedMaxPercent,
+			MaxWait:          cf.FairpoolTenantMaxWait,
+			AcquireTimeout:   cf.AcquireTimeout,
+			PoolName:         "read-replica",
+			L:                &l,
+		})
 
 		if err != nil {
 			return nil, fmt.Errorf("could not connect to read replica database: %w", err)
@@ -371,19 +328,18 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 	// Create a separate direct pool using DATABASE_URL for DDL operations. These operations are
 	// critical and cannot use the main pool if it's routed through pgbouncer, so a separate pool
 	// is justified.
-	ddlConfig, err := pgxpool.ParseConfig(databaseUrl)
+	ddlConfig, err := NewPgxPoolConfig(databaseUrl, PgxPoolOpts{
+		ApplicationName: appName + ":ddl",
+		MaxConns:        int32(cf.DDLPoolMaxConns), // nolint: gosec
+		MinConns:        int32(cf.DDLPoolMinConns), // nolint: gosec
+		MaxConnLifetime: cf.MaxConnLifetime,
+		MaxConnIdleTime: cf.MaxConnIdleTime,
+		DialTimeout:     cf.DialTimeout,
+		ConnectTimeout:  cf.ConnectTimeout,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("could not parse direct database url: %w", err)
 	}
-
-	setPgxApplicationName(ddlConfig, appName+":ddl")
-
-	ddlConfig.MaxConns = int32(cf.DDLPoolMaxConns) // nolint: gosec
-	ddlConfig.MinConns = int32(cf.DDLPoolMinConns) // nolint: gosec
-	ddlConfig.MaxConnLifetime = cf.MaxConnLifetime
-	ddlConfig.MaxConnIdleTime = cf.MaxConnIdleTime
-	ddlConfig.AfterConnect = pgxpoolConnAfterConnect
-	ddlConfig.ConnConfig.Tracer = newOTelPgxTracer()
 
 	ddlPool, err := pgxpool.NewWithConfig(context.Background(), ddlConfig)
 	if err != nil {
@@ -416,6 +372,7 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		RetryQueueLimit:      scf.Runtime.TaskOperationLimits.RetryQueueLimit,
 		DurableSleepLimit:    scf.Runtime.TaskOperationLimits.DurableSleepLimit,
 		ReassignUnackedTasks: scf.Runtime.TaskOperationLimits.ReassignUnackedTasks,
+		ChildRunDirectSpawn:  scf.Runtime.TaskOperationLimits.ChildRunDirectSpawn,
 	}
 
 	inlineStoreTTLDays := scf.PayloadStore.InlineStoreTTLDays
@@ -432,6 +389,8 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		ExternalCutoverNumConcurrentOffloads: scf.PayloadStore.ExternalCutoverNumConcurrentOffloads,
 		InlineStoreTTL:                       &inlineStoreTTL,
 		EnableWindowSizeOptimization:         scf.PayloadStore.EnableWindowSizeOptimization,
+		WrapTaskInputInStepRunData:           scf.PayloadStore.WrapTaskInputInStepRunData,
+		EnablePayloadConsolidation:           scf.PayloadStore.EnablePayloadConsolidation,
 	}
 
 	statusUpdateOpts := repov1.StatusUpdateBatchSizeLimits{
@@ -446,7 +405,7 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 	}
 
 	v1, cleanupV1 := repov1.NewRepository(
-		pool,
+		gatedPool,
 		ddlPool,
 		&l,
 		cf.CacheDuration,
@@ -461,6 +420,89 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		durableEventBufferOpts,
 	)
 
+	cleanupOLAP := func() error { return nil }
+
+	// a pool for a separate OLAP database, if configured. Reads and writes of the OLAP tables go
+	// there; the main database keeps the core tables only.
+	if cf.OLAP.DatabaseURL != "" {
+		olapConfig, err := NewPgxPoolConfig(cf.OLAP.DatabaseURL, PgxPoolOpts{
+			ApplicationName: appName + ":olap",
+			MaxConns:        int32(cmp.Or(cf.OLAP.MaxConns, cf.MaxConns)), // nolint: gosec
+			MinConns:        int32(cmp.Or(cf.OLAP.MinConns, cf.MinConns)), // nolint: gosec
+			MaxConnLifetime: cmp.Or(cf.OLAP.MaxConnLifetime, cf.MaxConnLifetime),
+			MaxConnIdleTime: cmp.Or(cf.OLAP.MaxConnIdleTime, cf.MaxConnIdleTime),
+			DialTimeout:     cmp.Or(cf.OLAP.DialTimeout, cf.DialTimeout),
+			ConnectTimeout:  cmp.Or(cf.OLAP.ConnectTimeout, cf.ConnectTimeout),
+		})
+
+		if err != nil {
+			return nil, fmt.Errorf("could not parse olap database url: %w", err)
+		}
+
+		if cf.LogQueries {
+			olapConfig.ConnConfig.Tracer = &tracelog.TraceLog{
+				Logger:   pgxzero.NewLogger(l),
+				LogLevel: tracelog.LogLevelDebug,
+			}
+		}
+
+		if cf.EnforceUTCTimezone {
+			if err := checkDatabaseTimezone(olapConfig.ConnConfig, "", "olap database", &l); err != nil {
+				return nil, err
+			}
+		}
+
+		olapTenantMaxPercent := cmp.Or(cf.OLAP.FairpoolTenantMaxPercent, cf.FairpoolTenantMaxPercent)
+		olapSharedMaxPercent := cmp.Or(cf.OLAP.FairpoolSharedMaxPercent, cf.FairpoolSharedMaxPercent)
+
+		if olapTenantMaxPercent < 1 || olapTenantMaxPercent > 100 {
+			return nil, fmt.Errorf("OLAP_DATABASE_FAIRPOOL_TENANT_MAX_PERCENT must be from 1 to 100, got %d", olapTenantMaxPercent)
+		}
+
+		if olapSharedMaxPercent < 1 || olapSharedMaxPercent > 100 {
+			return nil, fmt.Errorf("OLAP_DATABASE_FAIRPOOL_SHARED_MAX_PERCENT must be from 1 to 100, got %d", olapSharedMaxPercent)
+		}
+
+		olapPool, err := fairpool.NewWithConfig(context.Background(), olapConfig, fairpool.Options{
+			MaxPercent:       olapTenantMaxPercent,
+			SharedMaxPercent: olapSharedMaxPercent,
+			MaxWait:          cmp.Or(cf.OLAP.FairpoolTenantMaxWait, cf.FairpoolTenantMaxWait),
+			PoolName:         "olap",
+			L:                &l,
+		})
+
+		if err != nil {
+			return nil, fmt.Errorf("could not connect to olap database: %w", err)
+		}
+
+		olap, cleanupOLAPRepo := repov1.NewOLAPRepositoryFromFairPool(
+			olapPool,
+			&l,
+			olapPartitionRetention,
+			scf.Runtime.Limits,
+			scf.Runtime.EnforceLimits,
+			payloadStoreOpts,
+			statusUpdateOpts,
+			cf.CacheDuration,
+			true,
+		)
+
+		// Shared payloads (referenced payloads, and inputs left out of OLAP under payload
+		// consolidation) live in the main database, so the OLAP repository reads them through the
+		// core payload store.
+		olap.SetPayloadStoreOnSeparateDatabase(v1.Payloads())
+
+		v1.OverwriteOLAPRepository(olap)
+
+		cleanupOLAP = func() error {
+			err := cleanupOLAPRepo()
+
+			olapPool.Close()
+
+			return err
+		}
+	}
+
 	if readReplicaPool != nil {
 		v1.OLAP().SetReadReplicaPool(readReplicaPool)
 	}
@@ -469,14 +511,31 @@ func (c *ConfigLoader) InitDataLayer() (res *database.Layer, err error) {
 		Disconnect: func() error {
 			ch.Stop()
 
-			return cleanupV1()
+			olapErr := cleanupOLAP()
+
+			if err := cleanupV1(); err != nil {
+				return err
+			}
+
+			return olapErr
 		},
 		Pool:              pool,
 		DirectDatabaseURL: databaseUrl,
+		DialTimeout:       cf.DialTimeout,
+		ConnectTimeout:    cf.ConnectTimeout,
 		DDLPool:           ddlPool,
 		V1:                v1,
 		Seed:              cf.Seed,
 		Logger:            &l,
+		DefaultTenantEntitlements: repov1.TenantEntitlements{
+			AuditLogs:                       scf.Runtime.DefaultTenantEntitlements.AuditLogs,
+			PrometheusMetrics:               scf.Runtime.DefaultTenantEntitlements.PrometheusMetrics,
+			StrictAdditionalMetadataFilters: scf.Runtime.DefaultTenantEntitlements.StrictAdditionalMetadataFilters,
+			DurableStreams:                  scf.Runtime.DefaultTenantEntitlements.DurableStreams,
+			ServerlessOperator:              scf.Runtime.DefaultTenantEntitlements.ServerlessOperator,
+			SandboxOperator:                 scf.Runtime.DefaultTenantEntitlements.SandboxOperator,
+			OperatorStepDirectCompletion:    scf.Runtime.DefaultTenantEntitlements.OperatorStepDirectCompletion,
+		},
 	}, nil
 }
 
@@ -887,16 +946,16 @@ func createControllerLayer(dc *database.Layer, cf *server.ServerConfigFile, vers
 		return dc.V1.TenantEntitlement().HasEntitlement(ctx, tenantId, repov1.EntitlementPrometheusMetrics)
 	}, cf.Prometheus.TenantScoped, &l)
 
-	concurrencyOutbox, cleanupConcurrencyOutbox, err := newConcurrencyOutbox(dc.Pool, l)
+	outbox, cleanupOutbox, err := newOutbox(dc.Pool, l)
 
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not create concurrency outbox: %w", err)
+		return nil, nil, fmt.Errorf("could not create outbox: %w", err)
 	}
 
 	schedulingPoolV1, cleanupSchedulingPoolV1, err := v1.NewSchedulingPool(
 		dc.V1.Scheduler(),
 		dc.V1.Tasks(),
-		concurrencyOutbox,
+		outbox,
 		&queueLogger,
 		cf.Runtime.SingleQueueLimit,
 		cf.Runtime.SchedulerConcurrencyRateLimit,
@@ -922,7 +981,7 @@ func createControllerLayer(dc *database.Layer, cf *server.ServerConfigFile, vers
 
 		cleanupSecurityCheck()
 
-		cleanupConcurrencyOutbox()
+		cleanupOutbox()
 
 		if err := cleanupSchedulingPoolV1(); err != nil {
 			return fmt.Errorf("error cleaning up scheduling pool (v1): %w", err)
@@ -966,6 +1025,12 @@ func createControllerLayer(dc *database.Layer, cf *server.ServerConfigFile, vers
 		cf.Runtime.OperatorInfraBlockedCIDRs = getStrArr(cf.Runtime.OperatorInfraBlockedCIDRsString)
 	}
 
+	// The API server creates tenant rows with this value, so it is checked whether or not the
+	// in-engine operator is enabled.
+	if err := serverlessoperator.ValidateEndpointPartitionCount(cf.Runtime.ServerlessOperator.EndpointPartitionCount); err != nil {
+		return nil, nil, err
+	}
+
 	if cf.Runtime.Monitoring.TLSRootCAFile == "" {
 		cf.Runtime.Monitoring.TLSRootCAFile = cf.TLS.TLSRootCAFile
 	}
@@ -986,6 +1051,7 @@ func createControllerLayer(dc *database.Layer, cf *server.ServerConfigFile, vers
 		FePosthog:              feAnalyticsConfig,
 		Pylon:                  &pylon,
 		Runtime:                cf.Runtime,
+		PayloadStore:           cf.PayloadStore,
 		Auth:                   auth,
 		Encryption:             encryptionSvc,
 		Layer:                  dc,
@@ -1010,6 +1076,7 @@ func createControllerLayer(dc *database.Layer, cf *server.ServerConfigFile, vers
 		EnableDataRetention:    cf.EnableDataRetention,
 		EnableWorkerRetention:  cf.EnableWorkerRetention,
 		SchedulingPoolV1:       schedulingPoolV1,
+		AuditLogOutbox:         repov1.NewAuditLogOutbox(outbox, dc.Pool),
 		Version:                version,
 		Sampling:               cf.Sampling,
 		Operations:             cf.OLAP,
@@ -1042,6 +1109,8 @@ func createPubSubV1(dc *database.Layer, cf *server.ServerConfigFile, l *zerolog.
 		pubsubPoolConfig.MaxConns = cf.MessageQueue.PubSub.Postgres.MaxConns
 		pubsubPoolConfig.MinConns = cf.MessageQueue.PubSub.Postgres.MinConns
 		pubsubPoolConfig.ConnConfig.Tracer = newOTelPgxTracer()
+
+		boundPgxConnect(pubsubPoolConfig.ConnConfig, dc.DialTimeout, dc.ConnectTimeout)
 
 		pubsubPool, err := pgxpool.NewWithConfig(context.Background(), pubsubPoolConfig)
 
@@ -1154,6 +1223,63 @@ func getStrArr(v string) []string {
 	return strings.Split(v, " ")
 }
 
+// LoadDataEncryptionSvc builds an encryption service for data at rest only, from the master
+// keyset or the CloudKMS settings, without the JWT keysets LoadEncryptionSvc also requires. It
+// is for processes that encrypt and decrypt database columns but never mint or verify tokens,
+// such as the out-of-process serverless operator; the service's JWT handles are nil.
+func LoadDataEncryptionSvc(cf *server.EncryptionConfigFile) (encryption.EncryptionService, error) {
+	hasLocalMasterKeyset := cf.MasterKeyset != "" || cf.MasterKeysetFile != ""
+	isCloudKMSEnabled := cf.CloudKMS.Enabled
+
+	if !hasLocalMasterKeyset && !isCloudKMSEnabled {
+		return nil, fmt.Errorf("encryption is required")
+	}
+
+	if hasLocalMasterKeyset && isCloudKMSEnabled {
+		return nil, fmt.Errorf("cannot use both encryption and cloud kms")
+	}
+
+	if isCloudKMSEnabled {
+		encryptionSvc, err := encryption.NewCloudKMSDataEncryption(cf.CloudKMS.KeyURI, []byte(cf.CloudKMS.CredentialsJSON))
+
+		if err != nil {
+			return nil, fmt.Errorf("could not create CloudKMS encryption service: %w", err)
+		}
+
+		return encryptionSvc, nil
+	}
+
+	masterKeyset, err := loadMasterKeyset(cf)
+
+	if err != nil {
+		return nil, err
+	}
+
+	encryptionSvc, err := encryption.NewLocalDataEncryption(masterKeyset)
+
+	if err != nil {
+		return nil, fmt.Errorf("could not create raw keyset encryption service: %w", err)
+	}
+
+	return encryptionSvc, nil
+}
+
+// loadMasterKeyset returns the local master keyset, reading it from MasterKeysetFile when that
+// is set and from MasterKeyset otherwise.
+func loadMasterKeyset(cf *server.EncryptionConfigFile) ([]byte, error) {
+	if cf.MasterKeysetFile != "" {
+		masterKeysetBytes, err := loaderutils.GetFileBytes(cf.MasterKeysetFile)
+
+		if err != nil {
+			return nil, fmt.Errorf("could not load master keyset file: %w", err)
+		}
+
+		return masterKeysetBytes, nil
+	}
+
+	return []byte(cf.MasterKeyset), nil
+}
+
 func LoadEncryptionSvc(cf *server.ServerConfigFile) (encryption.EncryptionService, error) {
 	var err error
 
@@ -1202,20 +1328,14 @@ func LoadEncryptionSvc(cf *server.ServerConfigFile) (encryption.EncryptionServic
 	var encryptionSvc encryption.EncryptionService
 
 	if hasLocalMasterKeyset {
-		masterKeyset := cf.Encryption.MasterKeyset
+		masterKeyset, err := loadMasterKeyset(&cf.Encryption)
 
-		if cf.Encryption.MasterKeysetFile != "" {
-			masterKeysetBytes, err := loaderutils.GetFileBytes(cf.Encryption.MasterKeysetFile)
-
-			if err != nil {
-				return nil, fmt.Errorf("could not load master keyset file: %w", err)
-			}
-
-			masterKeyset = string(masterKeysetBytes)
+		if err != nil {
+			return nil, err
 		}
 
 		encryptionSvc, err = encryption.NewLocalEncryption(
-			[]byte(masterKeyset),
+			masterKeyset,
 			[]byte(privateJWT),
 			[]byte(publicJWT),
 		)
@@ -1332,6 +1452,65 @@ func checkDatabaseTimezone(connConfig *pgx.ConnConfig, dbName string, dbLabel st
 	return nil
 }
 
+// warnIfPgBouncerTimeoutsDisabled logs a warning when server connections behind PgBouncer start
+// without a statement or idle-in-transaction timeout. In transaction pooling mode, the AfterConnect
+// SETs reach only the server connection that served them, so the other server connections run with
+// their defaults. reset_val holds that default, for the role and database PgBouncer logs in with,
+// and SETs that other clients left on the server connection don't change it.
+func warnIfPgBouncerTimeoutsDisabled(connConfig *pgx.ConnConfig, l *zerolog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.ConnectConfig(ctx, connConfig)
+	if err != nil {
+		l.Warn().Err(err).Msg("could not check database timeouts")
+		return
+	}
+	defer conn.Close(context.Background())
+
+	rows, err := conn.Query(
+		ctx,
+		"SELECT name, reset_val FROM pg_settings WHERE name IN ('statement_timeout', 'idle_in_transaction_session_timeout')",
+	)
+	if err != nil {
+		l.Warn().Err(err).Msg("could not check database timeouts")
+		return
+	}
+
+	var disabled []string
+
+	for rows.Next() {
+		var name, resetVal string
+
+		if err := rows.Scan(&name, &resetVal); err != nil {
+			l.Warn().Err(err).Msg("could not check database timeouts")
+			return
+		}
+
+		// PgBouncer applies parameters from the connection string (track_extra_parameters) on top of
+		// the server default.
+		if _, ok := connConfig.RuntimeParams[name]; ok {
+			continue
+		}
+
+		if resetVal == "0" {
+			disabled = append(disabled, name)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		l.Warn().Err(err).Msg("could not check database timeouts")
+		return
+	}
+
+	if len(disabled) > 0 {
+		l.Warn().Strs("settings", disabled).Msg(
+			"database connections behind PgBouncer run without these timeouts, " +
+				"see https://docs.hatchet.run/self-hosting/using-pgbouncer#statement-timeouts",
+		)
+	}
+}
+
 // setPgxApplicationName sets application_name on the pool config unless the
 // connection string already provided one explicitly.
 func setPgxApplicationName(config *pgxpool.Config, appName string) {
@@ -1381,13 +1560,13 @@ func firstNWords(s string, n int) string {
 	return strings.ToUpper(strings.TrimSpace(s[:end]))
 }
 
-func newConcurrencyOutbox(pool *pgxpool.Pool, l zerolog.Logger) (pgoutbox.Outbox, func(), error) {
+func newOutbox(pool *pgxpool.Pool, l zerolog.Logger) (pgoutbox.Outbox, func(), error) {
 	ctx, cancel := context.WithCancel(context.Background()) // nolint:govet
 
-	// the scheduler's outbox shares the same database connection pool, this means that we need to be
+	// the outbox shares the engine's database connection pool, this means that we need to be
 	// careful not to cause deadlocks by opening a tx inside of a tx. The outbox methods all have a tx-scoped
 	// method which should be used instead of the non-scoped versions.
-	concurrencyOutbox, err := pgoutbox.NewOutbox(
+	outbox, err := pgoutbox.NewOutbox(
 		ctx,
 		pool,
 		pgoutbox.WithAutoMigrate(false),
@@ -1396,8 +1575,8 @@ func newConcurrencyOutbox(pool *pgxpool.Pool, l zerolog.Logger) (pgoutbox.Outbox
 	)
 
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not create concurrency outbox: %w", err) // nolint:govet
+		return nil, nil, fmt.Errorf("could not create outbox: %w", err) // nolint:govet
 	}
 
-	return concurrencyOutbox, cancel, nil
+	return outbox, cancel, nil
 }

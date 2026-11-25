@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -39,7 +40,7 @@ type QueueRepository interface {
 	MarkQueueItemsProcessed(ctx context.Context, r *AssignResults) (succeeded []*AssignedItem, failed []*AssignedItem, err error)
 
 	GetTaskRateLimits(ctx context.Context, tx *OptimisticTx, queueItems []*sqlcv1.V1QueueItem) (map[int64]map[string]int32, map[string]RateLimitDefinition, error)
-	RequeueRateLimitedItems(ctx context.Context, tenantId uuid.UUID, queueName string) ([]*sqlcv1.RequeueRateLimitedQueueItemsRow, error)
+	RequeueRateLimitedItems(ctx context.Context, tenantId uuid.UUID, queueName string) (*time.Time, error)
 	GetDesiredLabels(ctx context.Context, tx *OptimisticTx, stepIds []uuid.UUID) (map[uuid.UUID][]*sqlcv1.GetDesiredLabelsRow, error)
 	GetStepSlotRequests(ctx context.Context, tx *OptimisticTx, stepIds []uuid.UUID) (map[uuid.UUID]map[string]int32, error)
 	GetStepBatchConfigs(ctx context.Context, tx *OptimisticTx, stepIds []uuid.UUID) (map[string]bool, error)
@@ -55,7 +56,7 @@ type AssignmentRepository interface {
 }
 
 type OptimisticSchedulingRepository interface {
-	StartTx(ctx context.Context) (*OptimisticTx, error)
+	StartTx(ctx context.Context, tenantId uuid.UUID) (*OptimisticTx, error)
 
 	TriggerFromEvents(ctx context.Context, tx *OptimisticTx, tenantId uuid.UUID, opts []EventTriggerOpts) ([]*sqlcv1.V1QueueItem, *TriggerFromEventsResult, error)
 
@@ -115,7 +116,8 @@ type BatchQueueFactoryRepository interface {
 }
 
 type BatchQueueRepository interface {
-	ListBatchResources(ctx context.Context) ([]*sqlcv1.ListDistinctBatchResourcesRow, error)
+	// ListBatchResources returns steps with pending batched queue items; nil stepIds means all steps.
+	ListBatchResources(ctx context.Context, stepIds []uuid.UUID) ([]*sqlcv1.ListDistinctBatchResourcesRow, error)
 
 	ListBatchedQueueItems(ctx context.Context, stepId uuid.UUID, excludeIds []int64, limit int32) ([]*sqlcv1.V1BatchedQueueItem, error)
 	ListExistingBatchedQueueItemIds(ctx context.Context, ids []int64) (map[int64]struct{}, error)

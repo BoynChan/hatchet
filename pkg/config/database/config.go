@@ -37,6 +37,32 @@ type ConfigFile struct {
 	MaxConnLifetime time.Duration `mapstructure:"maxConnLifetime" json:"maxConnLifetime,omitempty" default:"15m"`
 	MaxConnIdleTime time.Duration `mapstructure:"maxConnIdleTime" json:"maxConnIdleTime,omitempty" default:"1m"`
 
+	// DialTimeout bounds the TCP connect of every new connection. During a failover the old
+	// primary's address can drop packets, and a dial to it holds a pool slot until this fires.
+	DialTimeout time.Duration `mapstructure:"dialTimeout" json:"dialTimeout,omitempty" default:"3s"`
+
+	// ConnectTimeout bounds the connect (dial, TLS, auth) and, separately, the connection setup
+	// queries. It overrides connect_timeout in the database URL. Keep it above the multi-second
+	// stalls a live but overloaded server can show during startup, or those turn into errors.
+	ConnectTimeout time.Duration `mapstructure:"connectTimeout" json:"connectTimeout,omitempty" default:"15s"`
+
+	// AcquireTimeout bounds how long a checkout from the main or read replica pool waits for a free
+	// connection, then fails. 0 waits until the caller's context ends.
+	AcquireTimeout time.Duration `mapstructure:"acquireTimeout" json:"acquireTimeout,omitempty" default:"30s"`
+
+	// FairpoolTenantMaxPercent is the share of the pool one tenant may hold.
+	// 100 (the default) installs no cap. Values from 1 to 99 cap each tenant at that percent of MaxConns.
+	FairpoolTenantMaxPercent int `mapstructure:"fairpoolTenantMaxPercent" json:"fairpoolTenantMaxPercent,omitempty" default:"100"`
+
+	// FairpoolSharedMaxPercent is the share of the pool the shared bucket may hold. The shared bucket
+	// carries engine work that is not tied to a tenant, such as the message queue, heartbeats and auth lookups.
+	// 100 (the default) installs no cap. Values from 1 to 99 cap it at that percent of MaxConns.
+	FairpoolSharedMaxPercent int `mapstructure:"fairpoolSharedMaxPercent" json:"fairpoolSharedMaxPercent,omitempty" default:"100"`
+
+	// FairpoolTenantMaxWait is how long an acquire waits for a slot before it fails.
+	// The wait is not applied to the query.
+	FairpoolTenantMaxWait time.Duration `mapstructure:"fairpoolTenantMaxWait" json:"fairpoolTenantMaxWait,omitempty" default:"5s"`
+
 	// ApplicationNamePrefix is prepended to the pgx application_name as "<prefix>:<otel service name>"
 	// so connections in pg_stat_activity can be attributed to a deployment. In Kubernetes this is
 	// populated with the pod namespace via the downward API (K8S_POD_NAMESPACE).
@@ -54,6 +80,30 @@ type ConfigFile struct {
 	// If enabled and the database timezone is not UTC, the server will panic on startup.
 	// To disable this check, set DATABASE_ENFORCE_UTC_TIMEZONE=false
 	EnforceUTCTimezone bool `mapstructure:"enforceUtcTimezone" json:"enforceUtcTimezone,omitempty" default:"true"`
+
+	// OLAP points the OLAP repository (run and event history, metrics, audit logs) at a separate
+	// database. When DatabaseURL is unset the OLAP tables live in the main database.
+	OLAP OLAPConfigFile `mapstructure:"olap" json:"olap,omitempty"`
+}
+
+// OLAPConfigFile configures the pool for a separate OLAP database. Every field other than
+// DatabaseURL is an override of the matching main database setting and falls back to it when
+// zero, so a deployment that only sets OLAP_DATABASE_URL gets the main pool's configuration.
+type OLAPConfigFile struct {
+	DatabaseURL string `mapstructure:"databaseUrl" json:"databaseUrl,omitempty" default:""`
+
+	MaxConns int `mapstructure:"maxConns" json:"maxConns,omitempty" default:"0"`
+	MinConns int `mapstructure:"minConns" json:"minConns,omitempty" default:"0"`
+
+	MaxConnLifetime time.Duration `mapstructure:"maxConnLifetime" json:"maxConnLifetime,omitempty" default:"0"`
+	MaxConnIdleTime time.Duration `mapstructure:"maxConnIdleTime" json:"maxConnIdleTime,omitempty" default:"0"`
+
+	DialTimeout    time.Duration `mapstructure:"dialTimeout" json:"dialTimeout,omitempty" default:"0"`
+	ConnectTimeout time.Duration `mapstructure:"connectTimeout" json:"connectTimeout,omitempty" default:"0"`
+
+	FairpoolTenantMaxPercent int           `mapstructure:"fairpoolTenantMaxPercent" json:"fairpoolTenantMaxPercent,omitempty" default:"0"`
+	FairpoolSharedMaxPercent int           `mapstructure:"fairpoolSharedMaxPercent" json:"fairpoolSharedMaxPercent,omitempty" default:"0"`
+	FairpoolTenantMaxWait    time.Duration `mapstructure:"fairpoolTenantMaxWait" json:"fairpoolTenantMaxWait,omitempty" default:"0"`
 }
 
 type SeedConfigFile struct {
@@ -76,6 +126,11 @@ type Layer struct {
 	// need LISTEN (e.g. the postgres PubSub) must build their pools from this.
 	DirectDatabaseURL string
 
+	// DialTimeout and ConnectTimeout bound new connections on the layer's pools. Pools built
+	// from DirectDatabaseURL apply them too.
+	DialTimeout    time.Duration
+	ConnectTimeout time.Duration
+
 	ReadReplicaPool *pgxpool.Pool
 
 	// DDLPool is meant for DDL-modifying operations like DETACH PARTITION CONCURRENTLY, which
@@ -85,6 +140,8 @@ type Layer struct {
 	V1 v1.Repository
 
 	Seed SeedConfigFile
+
+	DefaultTenantEntitlements v1.TenantEntitlements
 
 	// Logger is the configured database logger. Consumers should read it via
 	// GetLogger, which falls back to a disabled logger when the layer was
@@ -118,11 +175,28 @@ func BindAllEnv(v *viper.Viper) {
 	_ = v.BindEnv("minConns", "DATABASE_MIN_CONNS")
 	_ = v.BindEnv("maxConnLifetime", "DATABASE_MAX_CONN_LIFETIME")
 	_ = v.BindEnv("maxConnIdleTime", "DATABASE_MAX_CONN_IDLE_TIME")
+	_ = v.BindEnv("dialTimeout", "DATABASE_DIAL_TIMEOUT")
+	_ = v.BindEnv("connectTimeout", "DATABASE_CONNECT_TIMEOUT")
+	_ = v.BindEnv("acquireTimeout", "DATABASE_ACQUIRE_TIMEOUT")
+	_ = v.BindEnv("fairpoolTenantMaxPercent", "DATABASE_FAIRPOOL_TENANT_MAX_PERCENT")
+	_ = v.BindEnv("fairpoolSharedMaxPercent", "DATABASE_FAIRPOOL_SHARED_MAX_PERCENT")
+	_ = v.BindEnv("fairpoolTenantMaxWait", "DATABASE_FAIRPOOL_TENANT_MAX_WAIT")
 	_ = v.BindEnv("applicationNamePrefix", "K8S_POD_NAMESPACE")
 
 	_ = v.BindEnv("pgbouncerUrl", "DATABASE_PGBOUNCER_URL")
 	_ = v.BindEnv("ddlPoolMaxConns", "DATABASE_DDL_POOL_MAX_CONNS")
 	_ = v.BindEnv("ddlPoolMinConns", "DATABASE_DDL_POOL_MIN_CONNS")
+
+	_ = v.BindEnv("olap.databaseUrl", "OLAP_DATABASE_URL")
+	_ = v.BindEnv("olap.maxConns", "OLAP_DATABASE_MAX_CONNS")
+	_ = v.BindEnv("olap.minConns", "OLAP_DATABASE_MIN_CONNS")
+	_ = v.BindEnv("olap.maxConnLifetime", "OLAP_DATABASE_MAX_CONN_LIFETIME")
+	_ = v.BindEnv("olap.maxConnIdleTime", "OLAP_DATABASE_MAX_CONN_IDLE_TIME")
+	_ = v.BindEnv("olap.dialTimeout", "OLAP_DATABASE_DIAL_TIMEOUT")
+	_ = v.BindEnv("olap.connectTimeout", "OLAP_DATABASE_CONNECT_TIMEOUT")
+	_ = v.BindEnv("olap.fairpoolTenantMaxPercent", "OLAP_DATABASE_FAIRPOOL_TENANT_MAX_PERCENT")
+	_ = v.BindEnv("olap.fairpoolSharedMaxPercent", "OLAP_DATABASE_FAIRPOOL_SHARED_MAX_PERCENT")
+	_ = v.BindEnv("olap.fairpoolTenantMaxWait", "OLAP_DATABASE_FAIRPOOL_TENANT_MAX_WAIT")
 
 	_ = v.BindEnv("readReplicaEnabled", "READ_REPLICA_ENABLED")
 	_ = v.BindEnv("readReplicaDatabaseUrl", "READ_REPLICA_DATABASE_URL")

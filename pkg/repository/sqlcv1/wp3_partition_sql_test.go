@@ -7,21 +7,29 @@ import (
 )
 
 func TestWP3PartitionSQLQueries(t *testing.T) {
+	// Core: only 4 active partitioned tables
 	assert.Contains(t, createPartitions, "create_v1_range_partition('v1_task'")
 	assert.Contains(t, createPartitions, "create_v1_range_partition('v1_task_event'")
 	assert.Contains(t, createPartitions, "create_v1_range_partition('v1_payload'")
 	assert.Contains(t, createPartitions, "create_v1_monthly_range_partition('v1_lookup_table'")
-	assert.NotContains(t, createPartitions, "'v1_dag'")
-	assert.NotContains(t, createPartitions, "'v1_dag_to_task'")
-	assert.NotContains(t, createPartitions, "'v1_dag_data'")
-	assert.NotContains(t, createPartitions, "'v1_durable_event_log_file'")
-	assert.NotContains(t, createPartitions, "'v1_durable_event_log_entry'")
-	assert.NotContains(t, createPartitions, "'v1_durable_event_log_branch_point'")
-	assert.NotContains(t, createPartitions, "'v1_event'")
-	assert.NotContains(t, createPartitions, "'v1_log_line'")
-	assert.NotContains(t, createPartitions, "'v1_task_expression_eval'")
-	assert.NotContains(t, createPartitions, "'v1_stream_producer_cursor'")
+	for _, unusedCore := range []string{
+		"'v1_dag'",
+		"'v1_dag_to_task'",
+		"'v1_dag_data'",
+		"'v1_durable_event_log_file'",
+		"'v1_durable_event_log_entry'",
+		"'v1_durable_event_log_branch_point'",
+		"'v1_event'",
+		"'v1_log_line'",
+		"'v1_task_expression_eval'",
+		"'v1_stream_producer_cursor'",
+		"'v1_serverless_endpoint_event'",
+		"'v1_sandbox_event'",
+	} {
+		assert.NotContains(t, createPartitions, unusedCore)
+	}
 
+	// EnsureTablePartitionsExist: only the 3 active daily core tables
 	assert.Contains(t, ensureTablePartitionsExist, "v1_task_")
 	assert.Contains(t, ensureTablePartitionsExist, "v1_task_event_")
 	assert.Contains(t, ensureTablePartitionsExist, "v1_payload_")
@@ -30,17 +38,44 @@ func TestWP3PartitionSQLQueries(t *testing.T) {
 	assert.NotContains(t, ensureTablePartitionsExist, "v1_event_")
 	assert.NotContains(t, ensureTablePartitionsExist, "v1_durable_event_log_")
 
-	assert.Contains(t, createOLAPPartitions, "create_v1_range_partition('v1_tasks_olap'")
-	assert.Contains(t, createOLAPPartitions, "create_v1_range_partition('v1_runs_olap'")
-	assert.Contains(t, createOLAPPartitions, "create_v1_range_partition('v1_payloads_olap'")
-	assert.Contains(t, createOLAPPartitions, "create_v1_range_partition('v1_task_events_olap'")
-	assert.Contains(t, createOLAPPartitions, "create_v1_monthly_range_partition('v1_lookup_table_olap'")
-	assert.NotContains(t, createOLAPPartitions, "'v1_dags_olap'")
+	// OLAP: only 10 active partitioned tables (4 hash + 6 range/monthly)
+	for _, activeOLAP := range []string{
+		"create_v1_hash_partitions('v1_task_events_olap_tmp'",
+		"create_v1_hash_partitions('v1_task_status_updates_tmp'",
+		"create_v1_hash_partitions('v1_agg_task_statuses_minute_delta_olap'",
+		"create_v1_hash_partitions('v1_agg_task_events_minute_delta_olap'",
+		"create_v1_range_partition('v1_tasks_olap'",
+		"create_v1_range_partition('v1_runs_olap'",
+		"create_v1_range_partition('v1_agg_task_statuses_minute_olap'",
+		"create_v1_range_partition('v1_agg_task_events_minute_olap'",
+		"create_v1_range_partition('v1_task_events_olap'",
+		"create_v1_monthly_range_partition('v1_lookup_table_olap'",
+	} {
+		assert.Contains(t, createOLAPPartitions, activeOLAP)
+	}
+	for _, unusedOLAP := range []string{
+		"'v1_agg_events_minute_delta_olap'",
+		"'v1_dags_olap'",
+		"'v1_payloads_olap'",
+		"'v1_agg_events_minute_olap'",
+		"'v1_agg_stream_bytes_minute_olap'",
+		"'v1_events_olap'",
+		"'v1_event_to_run_olap'",
+		"'v1_event_lookup_table_olap'",
+		"'v1_incoming_webhook_validation_failures_olap'",
+		"'v1_cel_evaluation_failures_olap'",
+		"'v1_dag_to_task_olap'",
+		"'v1_statuses_olap'",
+		"'v1_otel_trace_olap'",
+		"'v1_otel_trace_lookup_olap'",
+		"'v1_audit_log'",
+	} {
+		assert.NotContains(t, createOLAPPartitions, unusedOLAP)
+	}
 
-	// Even when shouldManageOptionalTablePartitions ($1) is false, v1_task_events_olap and v1_lookup_table_olap
-	// must NOT be in the excluded parent_table list so their expired partitions continue to be cleaned up.
-	assert.Contains(t, listOLAPPartitionsBeforeDate, "'v1_events_olap'")
-	assert.Contains(t, listOLAPPartitionsBeforeDate, "'v1_statuses_olap'")
-	assert.NotContains(t, listOLAPPartitionsBeforeDate, "            'v1_task_events_olap'")
-	assert.NotContains(t, listOLAPPartitionsBeforeDate, "            'v1_lookup_table_olap'")
+	// ListOLAPPartitionsBeforeDate still includes legacy tables so previously created partitions are cleaned up.
+	assert.Contains(t, listOLAPPartitionsBeforeDate, "'v1_events_olap:daily'")
+	assert.Contains(t, listOLAPPartitionsBeforeDate, "'v1_statuses_olap:monthly'")
+	assert.Contains(t, listOLAPPartitionsBeforeDate, "'v1_task_events_olap:daily'")
+	assert.Contains(t, listOLAPPartitionsBeforeDate, "'v1_lookup_table_olap:monthly'")
 }
